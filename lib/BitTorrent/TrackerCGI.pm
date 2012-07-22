@@ -4,7 +4,7 @@ package BitTorrent::TrackerCGI;
 
 ## BitTorrent::TrackerCGI
 ##
-##   mod_perl implementation of BitTorrent tracker, using MySQL for storage
+##   mod_perl implementation of BitTorrent tracker, using SQLite3 for storage
 ##
 ##
 ## Copyright (c) 2003  Glue Logic LLC  All rights reserved  code()gluelogic.com
@@ -36,16 +36,21 @@ package BitTorrent::TrackerCGI;
 ## config below ##
 ##################
 
+use Apache2::Const -compile => qw(OK DECLINED M_GET M_POST M_OPTIONS HTTP_METHOD_NOT_ALLOWED);
+use Apache2::RequestRec;
+use APR::Table ();
+use Apache2::RequestIO ();
+
 ## TORRENT_BASE_URL, TORRENT_PATH, and the database connection
 ## info MUST be changed. The rest may be left at their defaults.
 
 ## Base URL to torrents (trailing directory '/' is not necessary)
-use constant TORRENT_BASE_URL	=> 'http://www.example.com';
+use constant TORRENT_BASE_URL	=> 'http://localhost';
 ## URL of the tracker (with /announce suffix path_info)
 use constant TRACKER_URL	=> TORRENT_BASE_URL.'/tracker/announce';
 
 ## Filesystem path under which to find .torrent files (MUST end with '/')
-use constant TORRENT_PATH	=> '/path/to/torrents/';
+use constant TORRENT_PATH	=> '/var/www/torrents/';
 ## Path to which to write torrent statistics HTML table
 use constant TORRENT_STATS_FILE	=> TORRENT_PATH.'/bt_stats.inc';
 ## Path to which to write torrent RSS XML <item>s
@@ -67,11 +72,6 @@ use constant REFRESH_INTERVAL	=>    0.5*REANNOUNCE_INTERVAL;
 ## HTML for image to use in for 'info' icon on stats page (e.g. '<img src=...>')
 use constant INFO_IMG		=> 'i';
 
-## Database connection info
-use constant MYSQL_HOST => 'localhost';
-use constant BT_DB_NAME => 'tablespace';
-use constant BT_DB_USER => 'db_user';
-use constant BT_DB_PASS => 'change_on_install';
 
 ##################
 ## config above ##
@@ -85,13 +85,22 @@ $BitTorrent::TrackerCGI::VERSION || 1;          # (eliminate Perl warning)
 $BitTorrent::TrackerCGI::VERSION  = 0.02;
 
 ## array ref for convenience and to ensure same settings used on all connect()s
-use constant BT_DB_INFO	=>['DBI:mysql:database='.BT_DB_NAME.';host='.MYSQL_HOST,
-			   BT_DB_USER, BT_DB_PASS,
-			   { PrintError=>1, RaiseError=>0, AutoCommit=>1 } ];
+use constant BT_DB_INFO	=>[
+    'DBI:SQLite:database=/var/www/tracker/bittracker.sqlite',
+    "", "",
+    { PrintError=>1, RaiseError=>1, AutoCommit=>1 } 
+];
 
 use strict;
+use warnings;
+
 use DBI ();
-use DBD::mysql ();
+use DBD::SQLite();
+use Digest::SHA1 ();
+use File::Find ();
+use Bundle::Apache2 ();
+
+
 BEGIN {
   use constant MOD_PERL => exists($::ENV{'MOD_PERL'})
     ? (require('mod_perl.pm'), $mod_perl::VERSION >= 1.99)
@@ -99,44 +108,15 @@ BEGIN {
 	: 1
     : 0;
   $BitTorrent::TrackerCGI::mark = 0;
-
   $::ENV{'PATH'} = "/bin:/usr/bin"; ## (for taint mode safety)
 
-  if (MOD_PERL) {
-    if (MOD_PERL > 1) {
-      eval 'use Apache2 ()';					$@ && die $@;
-      eval 'use Apache ()';					$@ && die $@;
-      eval 'use Apache::Const ()';				$@ && die $@;
-      eval 'use Apache::Connection ()';				$@ && die $@;
-      eval 'use Apache::RequestIO ()';				$@ && die $@;
-      eval 'use Apache::RequestRec ()';				$@ && die $@;
-      eval 'use Apache::RequestUtil ()';			$@ && die $@;
-    }
-    else {
-      eval 'use Apache ()';					$@ && die $@;
-      eval 'use Apache::Constants ()';				$@ && die $@;
-      package Apache;
-      eval 'use constant HTTP_METHOD_NOT_ALLOWED => '
-	  .'Apache::Constants::HTTP_METHOD_NOT_ALLOWED()';      $@ && die $@;
-      eval 'use constant M_GET => '
-	  .'Apache::Constants::M_GET()';			$@ && die $@;
-      eval 'use constant M_OPTIONS => '
-	  .'Apache::Constants::M_OPTIONS()';			$@ && die $@;
-    }
-    eval 'Apache::M_GET()';					$@ && die $@;
-    eval 'Apache::M_OPTIONS()';					$@ && die $@;
-    eval 'Apache::HTTP_METHOD_NOT_ALLOWED()';			$@ && die $@;
-    eval 'use Digest::SHA1 ()';					$@ && die $@;
-    eval 'use File::Find ()';					$@ && die $@;
-    ## (eval here to delay inclusion until needed if running CGI)
-  }
 }
 
 ## SQL query strings
 ## Collected here for convenience and consistency.
 ## (using placeholders automatically invokes $dbh->quote() on args; safe!)
 ## (It is not necessary for all of these to use $dbh->prepare_cached())
-use constant ATTR_USE_RESULT => { 'mysql_use_result' => 1 };
+use constant ATTR_USE_RESULT => {  };
 use constant QSTR =>
   {
 'summary_sha1'		=>  "SELECT peers,seeds FROM bt_summary WHERE sha1=?",
@@ -145,8 +125,8 @@ use constant QSTR =>
 			    " seeds=seeds+?, scc=scc+?, done=done+?,".
 			    " trans=trans+? WHERE sha1=?",
 
-'data_add'		=>  "REPLACE /*!LOW_PRIORITY*/ INTO bt_data ".
-			    "SET pend=?,upld=?,dnld=?,mark=NULL,peer_id=?",
+'data_add'		=>  "INSERT OR REPLACE  INTO bt_data ".
+			    "(pend, upld, dnld, mark, peer_id) values (?,?,?,NULL,?)",
 
 'data_update'		=>  "UPDATE /*!LOW_PRIORITY*/ bt_data ".
 			    "SET pend=?,upld=?,dnld=?,mark=NULL ".
@@ -157,19 +137,18 @@ use constant QSTR =>
 
 'info_get'		=>  "SELECT ip,status FROM bt_info WHERE peer_id=?",
 
-'info_add'		=>  "REPLACE INTO bt_info SET ip=INET_ATON(?),port=?,".
-			    " peer_id=?,sha1=?,status=?",
+'info_add'		=>  "INSERT OR REPLACE INTO bt_info (ip,port,peer_id, sha1) values (INET_ATON(?),?,?,?,?)",
 
 'info_peer_to_seed'	=>  "UPDATE bt_info SET status='seed' WHERE peer_id=?",
 
 'info_delete'		=>  "DELETE FROM bt_info WHERE peer_id=?",
 
 'pgroup_not_scc'	=>  "SELECT INET_NTOA(ip) AS ip, port,".
-			    " RPAD(peer_id,20,' ') AS 'peer id' FROM bt_info ".
+			    " substr(peer_id || '                    ', 1, 20) AS 'peer id' FROM bt_info ".    
 			    "WHERE sha1=? AND status != 'scc' LIMIT ?,?",
 
 'pgroup_only_peers'	=>  "SELECT INET_NTOA(ip) AS ip, port,".
-			    " RPAD(peer_id,20,' ') AS 'peer id' FROM bt_info ".
+			    " substr(peer_id || '                    ', 1, 20) AS 'peer id' FROM bt_info ".
 			    "WHERE sha1=? AND status = 'peer' LIMIT ?,?"
   };
 
@@ -231,11 +210,11 @@ sub handler {
 
     ## only accept HTTP request method "GET" (and M_HEAD == M_GET in Apache)
     if (MOD_PERL) {
-	unless ($r->method_number == Apache::M_GET) {
+	unless ($r->method_number == Apache2::Const::M_GET) {
 	    $r->allowed($r->allowed
-			| (1 << Apache::M_GET)
-			| (1 << Apache::M_OPTIONS));
-	    return Apache::HTTP_METHOD_NOT_ALLOWED;
+			| (1 << Apache2::Const::M_GET)
+			| (1 << Apache2::Const::M_OPTIONS));
+	    return Apache2::Const::HTTP_METHOD_NOT_ALLOWED;
 	}
 	## fixup $r->path_info if path translation was skipped
 	## (PerlTransHandler Apache::OK)
@@ -533,7 +512,7 @@ sub bt_scrape {
 
 	$sth = $dbh->prepare(
 	  "SELECT peers AS incomplete, seeds AS complete,".
-	  " RPAD(bt_summary.sha1,20,' ') AS sha1, name ".
+	  " substr(bt_summary.sha1 || '                    ', 1, 20)  AS sha1, name ".
 	  "FROM bt_summary,bt_names ".
 	  "WHERE bt_summary.sha1=? AND bt_summary.sha1=bt_names.sha1",
 	  ATTR_USE_RESULT);
@@ -543,7 +522,7 @@ sub bt_scrape {
     else {
 	$sth = $dbh->prepare(
 	  "SELECT peers AS incomplete, seeds AS complete,".
-	  " RPAD(bt_summary.sha1,20,' ') AS sha1, name ".
+	  " substr(bt_summary.sha1 || '                    ', 1, 20) AS sha1, name ".
 	  "FROM bt_summary,bt_names ".
 	  "WHERE bt_summary.sha1=bt_names.sha1", ATTR_USE_RESULT);
 	$sth->execute()
@@ -898,35 +877,36 @@ sub refresh_summary {
     ##  processes, so check a table in the database for the actual time mark.)
     ## (RaiseError MUST NOT be set in the database driver attribute, or else
     ##  this code might abort before unlocking tables and releasing the mutex!)
-    $dbh->selectrow_array("SELECT GET_LOCK('bt_tracker', 0)")
-      || return;
+#   $dbh->selectrow_array("SELECT GET_LOCK('bt_tracker', 0)")      || return;
+
     my $mark = $dbh->selectrow_array("SELECT mark FROM bt_mark WHERE rowid=0")
       || 0;
     ($mark < ($now - REFRESH_INTERVAL)
-	|| (!MOD_PERL && @ARGV && $ARGV[0] eq 'force-refresh'))
-      && $dbh->do("LOCK TABLES bt_summary WRITE")
-      || ($dbh->do("DO RELEASE_LOCK('bt_tracker')"), return);
+     || (!MOD_PERL && @ARGV && $ARGV[0] eq 'force-refresh'));
+
+#     && $dbh->do("LOCK TABLES bt_summary WRITE")
+#     || ($dbh->do("DO RELEASE_LOCK('bt_tracker')"), return);
     select(undef,undef,undef,1);
-    $dbh->do("LOCK TABLES bt_summary WRITE, bt_mark WRITE,".
-	     " bt_data WRITE, bt_info WRITE, bt_names READ")
-      || ($dbh->do("UNLOCK TABLES"),
-	  $dbh->do("DO RELEASE_LOCK('bt_tracker')"), return);
+#   $dbh->do("LOCK TABLES bt_summary WRITE, bt_mark WRITE,".
+#	     " bt_data WRITE, bt_info WRITE, bt_names READ")
+#     || ($dbh->do("UNLOCK TABLES"),
+#	  $dbh->do("DO RELEASE_LOCK('bt_tracker')"), return);
 
     $BitTorrent::TrackerCGI::mark = $now;
 
     ## (statistics can be regenerated from web logs; ignore errors)
     my $curr = $dbh->selectall_hashref(
       "SELECT trans,done,otrans,odone,".
-      " RPAD(bt_summary.sha1,20,' ') as sha1,size,mark,name ".
+      " substr(bt_summary.sha1 || '                    ', 1, 20) as sha1,size,mark,name ".
       "FROM bt_summary,bt_names WHERE bt_summary.sha1=bt_names.sha1",
       'sha1', ATTR_USE_RESULT) || +{};
 
     my $expired = $now - TIMEOUT_INTERVAL;
     my $deleted_sums = $dbh->selectall_hashref(
-      "SELECT RPAD(sha1,20,' ') AS sha1, COUNT(*) AS count,".
+      "SELECT substr(sha1 || '                    ', 1, 20) AS sha1, COUNT(*) AS count,".
       " SUM(upld+dnld) AS trans ".
       "FROM bt_data,bt_info WHERE bt_data.peer_id=bt_info.peer_id".
-      " AND mark < FROM_UNIXTIME($expired) GROUP BY sha1",
+      " AND mark < datetime($expired, 'unixepoch', 'localtime') GROUP BY sha1",
       'sha1', ATTR_USE_RESULT) || +{};
 
     my($sth,$k,$v,$d,$t);
@@ -938,7 +918,7 @@ sub refresh_summary {
     ##  it really does not matter much.)
     ## (there is an minor theoretical race condition between the above and this
     ##  query whereby stats may be lost if a peer times out between the queries)
-    $dbh->do("DELETE FROM bt_data WHERE mark < FROM_UNIXTIME($expired)")
+    $dbh->do("DELETE FROM bt_data WHERE mark < datetime($expired, 'unixepoch', 'localtime')")
       if (scalar keys %$deleted_sums);
     $sth = $dbh->prepare("DELETE FROM bt_info WHERE sha1=?");
     $sth->execute($_) foreach (keys %$deleted_sums);
@@ -947,7 +927,7 @@ sub refresh_summary {
     ## (since db tables already locked, use mysql_use_result method since
     ##  it is slightly faster and we can not block more than we already are)
     $sth = $dbh->prepare(
-      "SELECT RPAD(sha1,20,' '),status,COUNT(status),SUM(pend),SUM(upld+dnld) ".
+      "SELECT substr(sha1 || '                    ', 1, 20),status,COUNT(status),SUM(pend),SUM(upld+dnld) ".
       "FROM bt_info,bt_data WHERE bt_info.peer_id=bt_data.peer_id ".
       "GROUP BY sha1,status", ATTR_USE_RESULT);
     $sth->execute();
@@ -985,9 +965,9 @@ sub refresh_summary {
     }
 
     ## update mark, unlock tables, and release mutex
-    $dbh->do("REPLACE INTO bt_mark SET mark='$now', rowid=0");
-    $dbh->do("UNLOCK TABLES");
-    $dbh->do("DO RELEASE_LOCK('bt_tracker')");
+    $dbh->do("INSERT OR REPLACE INTO bt_mark (mark, rowid) values('$now',0)");
+#   $dbh->do("UNLOCK TABLES");
+#   $dbh->do("DO RELEASE_LOCK('bt_tracker')");
 
     ## synchronize summary and name table entries with entries in torrent dir
     scan_torrent_dir($curr, $now);
@@ -1026,10 +1006,10 @@ sub scan_torrent_dir {
 
     my $sth_summary_del=$dbh->prepare("DELETE FROM bt_summary WHERE sha1=?");
     my $sth_names_del=$dbh->prepare("DELETE FROM bt_names WHERE sha1=?");
-    my $sth_summary_ins=$dbh->prepare("INSERT INTO bt_summary SET sha1=?");
-    my $sth_names_ins=$dbh->prepare("INSERT INTO bt_names SET ".
-				    "size=?,mark=?,sha1=?,name=?");
-    my $sth_info_sel=$dbh->prepare("SELECT RPAD(peer_id,20,' ') FROM bt_info ".
+    my $sth_summary_ins=$dbh->prepare("INSERT INTO bt_summary (sha1) values (?)");
+    my $sth_names_ins=$dbh->prepare("INSERT INTO bt_names (size,mark, sha1,name) ".
+				    "values (?,?,?,?)");
+    my $sth_info_sel=$dbh->prepare("SELECT substr(peer_id || '                    ', 1, 20) FROM bt_info ".
 				   "WHERE sha1=?");
     my $sth_info_del=$dbh->prepare("DELETE FROM bt_info WHERE sha1=?");
     my $sth_data_del=$dbh->prepare("DELETE FROM bt_data WHERE peer_id=?");
@@ -1402,15 +1382,16 @@ ERR_INST
     $dbh = DBI->connect(@{(BT_DB_INFO)})
       || die('Database error: '.DBI->errstr."\n");
 
-    $dbh->do(qq{
+
+$dbh->do(qq{
 CREATE TABLE IF NOT EXISTS bt_names
 (
-size       BIGINT UNSIGNED DEFAULT '0' NOT NULL,
-mark       BIGINT UNSIGNED DEFAULT '0' NOT NULL,
-sha1     CHAR(20) BINARY PRIMARY KEY   NOT NULL,
-name  VARCHAR(92) DEFAULT ''           NOT NULL
+ size       BIGINT UNSIGNED DEFAULT '0' NOT NULL,
+ mark       BIGINT UNSIGNED DEFAULT '0' NOT NULL,
+ sha1     CHAR(20) PRIMARY KEY   NOT NULL,
+ name  VARCHAR(92) DEFAULT ''           NOT NULL
 )
-    }) || die('Database error: '.$dbh->errstr."\n");
+	 }) || die('Database error: '.$dbh->errstr."\n");
 
     $dbh->do(qq{
 CREATE TABLE IF NOT EXISTS bt_summary
@@ -1422,7 +1403,7 @@ done      INT UNSIGNED DEFAULT '0' NOT NULL,
 trans  BIGINT UNSIGNED DEFAULT '0' NOT NULL,
 otrans BIGINT UNSIGNED DEFAULT '0' NOT NULL,
 odone     INT UNSIGNED DEFAULT '0' NOT NULL,
-sha1 CHAR(20) BINARY PRIMARY KEY   NOT NULL
+sha1 CHAR(20) PRIMARY KEY   NOT NULL
 )
     }) || die('Database error: '.$dbh->errstr."\n");
 
@@ -1433,8 +1414,8 @@ pend        BIGINT UNSIGNED DEFAULT '0' NOT NULL,
 upld        BIGINT UNSIGNED DEFAULT '0' NOT NULL,
 dnld        BIGINT UNSIGNED DEFAULT '0' NOT NULL,
 mark TIMESTAMP(14),
-peer_id   CHAR(20) BINARY PRIMARY KEY   NOT NULL
-) TYPE=HEAP MAX_ROWS=65535
+peer_id   CHAR(20) PRIMARY KEY   NOT NULL
+) 
     }) || die('Database error: '.$dbh->errstr."\n");
 
     $dbh->do(qq{
@@ -1442,19 +1423,28 @@ CREATE TABLE IF NOT EXISTS bt_info
 (
 ip          BIGINT UNSIGNED DEFAULT '0' NOT NULL,
 port      SMALLINT UNSIGNED DEFAULT '0' NOT NULL,
-peer_id   CHAR(20) BINARY PRIMARY KEY   NOT NULL,
-sha1      CHAR(20) BINARY               NOT NULL,
-status        ENUM('peer','scc','seed') default 'peer' NOT NULL,
-INDEX     stat_idx (sha1,status)
-) TYPE=HEAP MAX_ROWS=65535
+peer_id   CHAR(20) PRIMARY KEY   NOT NULL,
+sha1      CHAR(20)               NOT NULL,
+status    CHAR(4) default 'peer' NOT NULL
+) 
     }) || die('Database error: '.$dbh->errstr."\n");
+
+
+    $dbh->do(qq{
+CREATE INDEX IF NOT EXISTS  stat_idx ON bt_info(sha1,status)
+
+    }) || die('Database error: '.$dbh->errstr."\n");
+
+#INDEX     stat_idx (sha1,status)
+
+
 
     $dbh->do(qq{
 CREATE TABLE IF NOT EXISTS bt_mark
 (
 mark      BIGINT UNSIGNED DEFAULT '0' NOT NULL,
 rowid        INT UNSIGNED DEFAULT '0' NOT NULL UNIQUE
-) TYPE=HEAP MAX_ROWS=1
+) 
     }) || die('Database error: '.$dbh->errstr."\n");
 
     ## set up torrents in torrents directory
@@ -1596,3 +1586,11 @@ Are peer_ids unique between the same client downloading different torrents?
 I assumed as such.  If this is not the case, I need to update the PRIMARY KEY
 in bt_data table to be (sha1,peer_id) (after adding a sha1 column), and to
 update appropriate WHERE clauses in numerous other queries.
+
+
+See Also:
+--------------
+http://verysimple.com/2010/01/12/sqlite-lpad-rpad-function/
+http://mail-archives.apache.org/mod_mbox/perl-modperl/200509.mbox/%3CPine.LNX.4.63.0509082243310.9521@theoryx5.uwinnipeg.ca%3E
+http://www.perturb.org/display/entry/629/
+http://www.sqlite.org/lang_insert.html

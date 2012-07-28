@@ -1506,3 +1506,4 @@ http://mail-archives.apache.org/mod_mbox/perl-modperl/200509.mbox/%3CPine.LNX.4.
 http://www.perturb.org/display/entry/629/
 http://www.sqlite.org/lang_insert.html
 http://www.perlmonks.org/?node_id=817899
+http://www.sqlite.org/datatype3.html

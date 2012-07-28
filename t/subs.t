@@ -91,16 +91,18 @@ my $peer = {
 };
 
 #####
-$BitTorrent::TrackerCode::cgi{'numwant'}=0;
-$BitTorrent::TrackerCode::cgi{'event'}='stopped'; # started, completed, ""
-$BitTorrent::TrackerCode::cgi{'last'}=1;
-$BitTorrent::TrackerCode::cgi{'left'}=1;
-$BitTorrent::TrackerCode::cgi{'info_hash'}="12345678901234567890"; # binary info_hash is 20 chars, hex-encoded is 40 chars; accept either
-$BitTorrent::TrackerCode::cgi{'ip'}="192.168.1.1";
-$BitTorrent::TrackerCode::cgi{'port'}="1234";
-$BitTorrent::TrackerCode::cgi{'peer_id'}='test';
-$BitTorrent::TrackerCode::cgi{'uploaded'}='123';
-$BitTorrent::TrackerCode::cgi{'downloaded'}='123';
+BitTorrent::TrackerCore::setcgi(
+    "Mike" => 1,
+    'numwant'=>0,
+    'event' =>'stopped', # started, completed, ""
+    'last' =>1,
+    'left' =>1,
+    'info_hash' =>"12345678901234567890", # binary info_hash is 20 chars, hex-encoded is 40 chars; accept either
+    'ip' => "192.168.1.1",
+    'port' =>"1234",
+    'peer_id'=>'test',
+    'uploaded'=>'123',
+    'downloaded'=>'123');
 
 use constant BT_DB_INFO	=>[
     'DBI:SQLite:database=/var/www/tracker/bittracker.sqlite',
@@ -108,20 +110,20 @@ use constant BT_DB_INFO	=>[
     { PrintError=>1, RaiseError=>1, AutoCommit=>1 } 
 ];
 
-if (!$BitTorrent::TrackerCode::dbh) {
-    $BitTorrent::TrackerCode::dbh = DBI->connect(@{(BT_DB_INFO)})
+if (!$BitTorrent::TrackerCore::dbh) {
+    $BitTorrent::TrackerCore::dbh = DBI->connect(@{(BT_DB_INFO)})
     || die 'Database error.';
 }
-die "No database" unless $BitTorrent::TrackerCode::dbh;
+die "No database" unless $BitTorrent::TrackerCore::dbh;
 
 ##################
 
 BitTorrent::TrackerCore::bt_peer_progress ($peer);
-BitTorrent::TrackerCore::bt_peer_started ();
-BitTorrent::TrackerCore::bt_peer_stopped ();
-BitTorrent::TrackerCore::bt_scrape ();
+BitTorrent::TrackerCore::bt_peer_started ($peer);
+BitTorrent::TrackerCore::bt_peer_stopped ($peer);
+BitTorrent::TrackerCore::bt_scrape ($peer);
 BitTorrent::TrackerCore::bt_send_peer_list ();
-BitTorrent::TrackerCore::check_last_update ();
+#BitTorrent::TrackerCore::check_last_update ();
 BitTorrent::TrackerCore::convert_ip_ntoa  ();
 BitTorrent::TrackerCore::html_encode_in_place ();
 BitTorrent::TrackerCore::is_peer ();

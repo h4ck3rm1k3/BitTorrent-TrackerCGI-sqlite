@@ -143,6 +143,16 @@ use constant BT_EVENTS =>
 
 #our($dbh,%cgi,@params);
 
+# this is the webserver specific code, the generic code has been refactored for testing. 
+sub bt_scrape {
+
+    my $r = shift || confess "missing peer";;
+
+    BitTorrent::TrackerCore::bt_scrape();
+
+    ## Run cleanup if refresh interval has elapsed.
+    check_last_update($r);
+}
 
 sub check_last_update {
     my $r=shift|| confess "missing request";;

@@ -22,11 +22,13 @@ use Convert::Bencode_XS qw(bencode bdecode);
 use APR::Table ();
 use Errno ();
 use Fcntl ();
-use Socket ();
+use Socket;
+
 use Symbol ();
 our $dbh;
 our @params;
 our %cgi =();
+our $debug=1;
 
 ## BitTorrent::TrackerCGI
 ##
@@ -131,35 +133,25 @@ use constant QSTR =>
   {
 'summary_sha1'		=>  "SELECT peers,seeds FROM bt_summary WHERE sha1=?",
 
-'summary_update'	=>  "UPDATE bt_summary SET peers=peers+?,".
-			    " seeds=seeds+?, scc=scc+?, done=done+?,".
-			    " trans=trans+? WHERE sha1=?",
+'summary_update'	=>  "UPDATE bt_summary SET peers=peers+?,seeds=seeds+?, scc=scc+?, done=done+?,trans=trans+? WHERE sha1=?",
 
-'data_add'		=>  "INSERT OR REPLACE  INTO bt_data ".
-			    "(pend, upld, dnld, mark, peer_id) values (?,?,?,NULL,?)",
+'data_add'		=>  "INSERT OR REPLACE  INTO bt_data (pend, upld, dnld, mark, peer_id) values (?,?,?,NULL,?)",
 
-'data_update'		=>  "UPDATE /*!LOW_PRIORITY*/ bt_data ".
-			    "SET pend=?,upld=?,dnld=?,mark=NULL ".
-			    "WHERE peer_id=?",
+'data_update'		=>  "UPDATE bt_data SET pend=?,upld=?,dnld=?,mark=NULL WHERE peer_id=?",
 
-'data_delete'		=>  "DELETE /*!LOW_PRIORITY*/ FROM bt_data ".
-			    "WHERE peer_id=?",
+'data_delete'		=>  "DELETE  FROM bt_data WHERE peer_id=?",
 
 'info_get'		=>  "SELECT ip,status FROM bt_info WHERE peer_id=?",
 
-'info_add'		=>  "INSERT OR REPLACE INTO bt_info (ip,port,peer_id, sha1) values (?,?,?,?,?)", #INET_ATON(
+'info_add'		=>  "INSERT OR REPLACE INTO bt_info (ip,port,peer_id, sha1) values (?,?,?,?)", #INET_ATON(
 
 'info_peer_to_seed'	=>  "UPDATE bt_info SET status='seed' WHERE peer_id=?",
 
 'info_delete'		=>  "DELETE FROM bt_info WHERE peer_id=?",
 
-'pgroup_not_scc'	=>  "SELECT ip AS ip, port,". # INET_NTOA(ip)
-			    " substr(peer_id || '                    ', 1, 20) AS 'peer id' FROM bt_info ".    
-			    "WHERE sha1=? AND status != 'scc' LIMIT ?,?",
+'pgroup_not_scc'	=>  "SELECT ip AS ip, port, substr(peer_id || '                    ', 1, 20) AS 'peer id' FROM bt_info WHERE sha1=? AND status != 'scc' LIMIT ?,?",
 
-'pgroup_only_peers'	=>  "SELECT ip AS ip, port,". #INET_NTOA(io)
-			    " substr(peer_id || '                    ', 1, 20) AS 'peer id' FROM bt_info ".
-			    "WHERE sha1=? AND status = 'peer' LIMIT ?,?"
+'pgroup_only_peers'	=>  "SELECT ip AS ip, port,substr(peer_id || '                    ', 1, 20) AS 'peer id' FROM bt_info WHERE sha1=? AND status = 'peer' LIMIT ?,?"
   };
 
 ## encoding and decoding binary data to/from a string of hexadecimal pairs
@@ -194,11 +186,14 @@ use constant BT_EVENTS =>
 
 sub convert_ip_ntoa 
 {
-    warn "convert_ip_ntoa :" . Dumper(\@_);
+    my $ip=shift;
+    my $peer_addr = inet_ntoa($ip);
+    warn "convert_ip_ntoa :" . $ip  . " -> ". $peer_addr;
+    return $peer_addr;
 }
 
 sub bt_send_peer_list {
-    my($torrent) = @_;
+    my($torrent) = shift || confess "missing torrent";
     my $numwant = $cgi{'numwant'};
     my $num_peers = $$torrent{'peers'} + $$torrent{'seeds'};
 
@@ -626,8 +621,13 @@ use constant PROTOCOL_NAME     => 'BitTorrent protocol';
 use constant PROTOCOL_NAME_LEN => length(PROTOCOL_NAME);
 
 sub is_peer {
+
+## $iaddr must be packed address, i.e. inet_aton($ip)
+    my $iaddr=shift || confess "missing packed address";
+    my $port =shift ||  confess "missing port"; 
+
     CHECK_PEER || return 1; ## assume reachable if CHECK_PEER is disabled
-    my($iaddr,$port) = @_; ## $iaddr must be packed address, i.e. inet_aton($ip)
+
     my($flags,$rpackedaddr,$data);
     my $SH = Symbol::gensym;
     my $bitvec = '';
@@ -649,7 +649,11 @@ sub is_peer {
     ## connect to remote address and port
     ## 'man 2 connect' for nonblocking methodology with EINPROGRESS
     ## timeout after 5 seconds (modify time in select() below to change this)
-    connect($SH, Socket::sockaddr_in($port, $iaddr))
+
+    warn "Going to try and connect to port :$port and iaddr:$iaddr\n" if $debug;
+    my $x=Socket::sockaddr_in($port, $iaddr);
+    warn "Got socket: $x" if $debug;
+    connect($SH, $x)
       || $! == Errno::EINPROGRESS
       || return 0;
     select(undef,my $w=$bitvec,undef,5) > 0
@@ -708,6 +712,16 @@ sub is_peer {
 ## the mainline code and run it separately as a cron job.
 ##
 ##  refresh_summary($r->request_time)
+
+sub Connect
+{
+    if (!$dbh) {
+	$dbh = DBI->connect(@{(BT_DB_INFO)})
+	    || die 'Database error.';
+    }
+    die "No database" unless $dbh;
+}
+
 sub refresh_summary {
     my $now = shift || confess "missing now param";
 
@@ -721,11 +735,7 @@ sub refresh_summary {
     ## (RaiseError MUST NOT be set in the database driver attribute, or else
     ##  this code might abort before unlocking tables and releasing the mutex!)
 #   $dbh->selectrow_array("SELECT GET_LOCK('bt_tracker', 0)")      || return;
-    if (!$dbh) {
-	$dbh = DBI->connect(@{(BT_DB_INFO)})
-	    || die 'Database error.';
-    }
-    die "No database" unless $dbh;
+    Connect();
     my $mark = $dbh->selectrow_array("SELECT mark FROM bt_mark WHERE rowid=0")
       || 0;
     die unless $mark;
@@ -897,20 +907,38 @@ sub scan_torrent_dir {
     }
 }
 
+
 sub process_torrent_files {
+
+    # this is called from File::Find 
+    my $path = $_;
+    my $name =$File::Find::name;
     my $relative_path;
-    !(-l _) && $File::Find::name =~ m/\Q@{[(TORRENT_PATH)]}\E(.+)/o
-      ? ($relative_path = $1)
-      : return;
-    my $metainfo = read_torrent_file($File::Find::name);
+    if (-f $path)
+    {
+	if ($name =~ m/\Q@{[(TORRENT_PATH)]}\E(.+)/o) {
+	    $relative_path = $1;
+	}
+	else {
+	    warn "bad filename $name";
+	    return;
+	}
+    }
+    elsif (-l $path)
+    {
+	warn "$path is a link";
+	return;
+    }
+    
+    my $metainfo = read_torrent_file($name);
     if (!$metainfo) {
-	print STDERR "$File::Find::name cannot be read\n";
+	print STDERR "$name cannot be read\n";
 	return; ## (torrents that become unreadable will be deleted from db!)
     }
     if (! $$metainfo{'announce'} eq TRACKER_URL )
     {
 	print STDERR 
-	    "$File::Find::name does not announce this tracker (". 
+	    "$name does not announce this tracker (". 
 	    TRACKER_URL.
 	    " NE " . 
 	    $$metainfo{'announce'} .  
@@ -932,7 +960,13 @@ sub process_torrent_files {
 	}
 	$$metainfo{'info'}->{'name'} ||=
 	  length($relative_path) <= 92 ? $relative_path : '';
+
+	confess "missing sth_summary_ins" unless $sth_summary_ins;
+#	warn Dumper($sth_summary_ins);
+	warn "going to add $sha1";
 	$sth_summary_ins->execute($sha1);
+
+
 	$sth_names_ins->execute($size,$now,$sha1,$$metainfo{'info'}->{'name'});
 	@{$$metainfo{'info'}}{'sha1','size','avg_rate','avg_progress'} =
 	  ($sha1,$size,0,0);
@@ -1214,16 +1248,98 @@ sub parse_query_string {
 ## the db table install routine multiple times, so no attempt is made to detect
 ## if QUERY_STRING contains ISINDEX-style args.
 
+sub DropTables {
+
+    Connect();
+    $dbh->do(qq{ drop TABLE if exists bt_names  }) || die('Database error: '.$dbh->errstr."\n");
+    $dbh->do(qq{ drop TABLE if exists bt_summary    }) || die('Database error: '.$dbh->errstr."\n");
+    $dbh->do(qq{ drop TABLE if exists bt_data    }) || die('Database error: '.$dbh->errstr."\n");
+    $dbh->do(qq{ drop TABLE if exists bt_info    }) || die('Database error: '.$dbh->errstr."\n");
+    $dbh->do(qq{ drop INDEX if exists stat_idx    }) || die('Database error: '.$dbh->errstr."\n");
+    $dbh->do(qq{ drop TABLE if exists bt_mark    }) || die('Database error: '.$dbh->errstr."\n");
+
+}
+
+
+sub CreateTables
+{
+    Connect();
+
+    $dbh->do(qq{
+CREATE TABLE IF NOT EXISTS bt_names
+(
+ size       BIGINT UNSIGNED DEFAULT '0' NOT NULL,
+ mark       BIGINT UNSIGNED DEFAULT '0' NOT NULL,
+ sha1     CHAR(20) PRIMARY KEY   NOT NULL,
+ name  VARCHAR(92) DEFAULT ''           NOT NULL
+)
+	     }) || die('Database error: '.$dbh->errstr."\n");
+
+    $dbh->do(qq{
+    CREATE TABLE IF NOT EXISTS bt_summary
+    (
+     peers     INT UNSIGNED DEFAULT '0' NOT NULL,
+     seeds     INT UNSIGNED DEFAULT '0' NOT NULL,
+     scc       INT UNSIGNED DEFAULT '0' NOT NULL,
+     done      INT UNSIGNED DEFAULT '0' NOT NULL,
+     trans  BIGINT UNSIGNED DEFAULT '0' NOT NULL,
+     otrans BIGINT UNSIGNED DEFAULT '0' NOT NULL,
+     odone     INT UNSIGNED DEFAULT '0' NOT NULL,
+     sha1 BLOB(20) PRIMARY KEY   NOT NULL
+    )
+    }) || die('Database error: '.$dbh->errstr."\n");
+
+    $dbh->do(qq{
+    CREATE TABLE IF NOT EXISTS bt_data
+    ( 
+      pend        BIGINT UNSIGNED DEFAULT '0' NOT NULL,
+      upld        BIGINT UNSIGNED DEFAULT '0' NOT NULL,
+      dnld        BIGINT UNSIGNED DEFAULT '0' NOT NULL,
+      mark TIMESTAMP(14),
+      peer_id   BLOB(20) PRIMARY KEY   NOT NULL
+    ) 
+    }) || die('Database error: '.$dbh->errstr."\n");
+
+    $dbh->do(qq{
+    CREATE TABLE IF NOT EXISTS bt_info
+    (
+     ip          BIGINT UNSIGNED DEFAULT '0' NOT NULL,
+     port      SMALLINT UNSIGNED DEFAULT '0' NOT NULL,
+     peer_id   BLOB(20) PRIMARY KEY   NOT NULL,
+     sha1      BLOB(20)               NOT NULL,
+     status    CHAR(4) default 'peer' NOT NULL
+    ) 
+    }) || die('Database error: '.$dbh->errstr."\n");
+
+
+    $dbh->do(qq{
+    CREATE INDEX IF NOT EXISTS  stat_idx ON bt_info(sha1,status)    
+    }) || die('Database error: '.$dbh->errstr."\n");
+
+#INDEX     stat_idx (sha1,status)
+
+
+## The bt_mark contains the timestamp 
+    $dbh->do(qq{
+    CREATE TABLE IF NOT EXISTS bt_mark
+    (
+     mark      BIGINT UNSIGNED DEFAULT '0' NOT NULL,
+     rowid        INT UNSIGNED DEFAULT '0' NOT NULL UNIQUE
+    ) 
+    }) || die('Database error: '.$dbh->errstr."\n");
+
+}
+
 ## MAX_ROWS is used in database table creation
 ## (must 'alter table' after tables created; changing this will have no effect)
 ## Note: MAX_ROWS is only advisory to MySQL to help it choose pointers sizes
 sub Main 
 {
     if ($ARGV[0] eq 'force-refresh') {
-    print "Content-type: text/plain; charset=ISO-8859-1\n\n"
-      if (exists $::ENV{'GATEWAY_INTERFACE'});
-    $dbh = DBI->connect(@{(BT_DB_INFO)})
-      || die('Database error: '.DBI->errstr."\n");
+    print "Content-type: text/plain; charset=ISO-8859-1\n\n"	if (exists $::ENV{'GATEWAY_INTERFACE'});
+
+    Connect();
+
     refresh_summary($^T);
     print "\ndone\n\n";
 }
@@ -1239,73 +1355,7 @@ elsif ($ARGV[0] eq 'refresh') {
     ## (If you change the size of bt_names.name VARCHAR(92), you must change
     ##  the places in the file that hard-code this length; just search for "92")
 
-    $dbh = DBI->connect(@{(BT_DB_INFO)})
-      || die('Database error: '.DBI->errstr."\n");
-
-
-$dbh->do(qq{
-CREATE TABLE IF NOT EXISTS bt_names
-(
- size       BIGINT UNSIGNED DEFAULT '0' NOT NULL,
- mark       BIGINT UNSIGNED DEFAULT '0' NOT NULL,
- sha1     CHAR(20) PRIMARY KEY   NOT NULL,
- name  VARCHAR(92) DEFAULT ''           NOT NULL
-)
-	 }) || die('Database error: '.$dbh->errstr."\n");
-
-    $dbh->do(qq{
-CREATE TABLE IF NOT EXISTS bt_summary
-(
-peers     INT UNSIGNED DEFAULT '0' NOT NULL,
-seeds     INT UNSIGNED DEFAULT '0' NOT NULL,
-scc       INT UNSIGNED DEFAULT '0' NOT NULL,
-done      INT UNSIGNED DEFAULT '0' NOT NULL,
-trans  BIGINT UNSIGNED DEFAULT '0' NOT NULL,
-otrans BIGINT UNSIGNED DEFAULT '0' NOT NULL,
-odone     INT UNSIGNED DEFAULT '0' NOT NULL,
-sha1 CHAR(20) PRIMARY KEY   NOT NULL
-)
-    }) || die('Database error: '.$dbh->errstr."\n");
-
-    $dbh->do(qq{
-CREATE TABLE IF NOT EXISTS bt_data
-( 
-pend        BIGINT UNSIGNED DEFAULT '0' NOT NULL,
-upld        BIGINT UNSIGNED DEFAULT '0' NOT NULL,
-dnld        BIGINT UNSIGNED DEFAULT '0' NOT NULL,
-mark TIMESTAMP(14),
-peer_id   CHAR(20) PRIMARY KEY   NOT NULL
-) 
-    }) || die('Database error: '.$dbh->errstr."\n");
-
-    $dbh->do(qq{
-CREATE TABLE IF NOT EXISTS bt_info
-(
-ip          BIGINT UNSIGNED DEFAULT '0' NOT NULL,
-port      SMALLINT UNSIGNED DEFAULT '0' NOT NULL,
-peer_id   CHAR(20) PRIMARY KEY   NOT NULL,
-sha1      CHAR(20)               NOT NULL,
-status    CHAR(4) default 'peer' NOT NULL
-) 
-    }) || die('Database error: '.$dbh->errstr."\n");
-
-
-    $dbh->do(qq{
-CREATE INDEX IF NOT EXISTS  stat_idx ON bt_info(sha1,status)
-
-    }) || die('Database error: '.$dbh->errstr."\n");
-
-#INDEX     stat_idx (sha1,status)
-
-
-## The bt_mark contains the timestamp 
-    $dbh->do(qq{
-CREATE TABLE IF NOT EXISTS bt_mark
-(
-mark      BIGINT UNSIGNED DEFAULT '0' NOT NULL,
-rowid        INT UNSIGNED DEFAULT '0' NOT NULL UNIQUE
-) 
-    }) || die('Database error: '.$dbh->errstr."\n");
+    CreateTables;
 
     ## set up torrents in torrents directory
     refresh_summary($^T);
@@ -1455,3 +1505,4 @@ http://verysimple.com/2010/01/12/sqlite-lpad-rpad-function/
 http://mail-archives.apache.org/mod_mbox/perl-modperl/200509.mbox/%3CPine.LNX.4.63.0509082243310.9521@theoryx5.uwinnipeg.ca%3E
 http://www.perturb.org/display/entry/629/
 http://www.sqlite.org/lang_insert.html
+http://www.perlmonks.org/?node_id=817899

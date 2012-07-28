@@ -122,17 +122,52 @@ BitTorrent::TrackerCore::bt_peer_progress ($peer);
 BitTorrent::TrackerCore::bt_peer_started ($peer);
 BitTorrent::TrackerCore::bt_peer_stopped ($peer);
 BitTorrent::TrackerCore::bt_scrape ($peer);
-BitTorrent::TrackerCore::bt_send_peer_list ();
+
+my $torrent = {
+    peers => 1,
+    seeds => 2,
+    
+};
+
+BitTorrent::TrackerCore::bt_send_peer_list ($torrent);
 #BitTorrent::TrackerCore::check_last_update ();
-BitTorrent::TrackerCore::convert_ip_ntoa  ();
-BitTorrent::TrackerCore::html_encode_in_place ();
-BitTorrent::TrackerCore::is_peer ();
+
+
 BitTorrent::TrackerCore::parse_query_string ();
 BitTorrent::TrackerCore::print_stats ();
+
+
+
+#######################
+###summary
+BitTorrent::TrackerCore::Connect();
+
+my $sth_summary_ins=$BitTorrent::TrackerCore::dbh->prepare("INSERT INTO bt_summary (sha1) values (?)");
+my $sth_names_ins=$BitTorrent::TrackerCore::dbh->prepare("INSERT INTO bt_names (size,mark, sha1,name) values (?,?,?,?)");
+my %torrents;
+my $counts;
+my $now=time();
+## loop down through directory reading torrent files
+@BitTorrent::TrackerCore::params = (\%torrents,$counts,$now,$sth_summary_ins,$sth_names_ins);
+$_= "/var/www/torrents/earth-20120401130001.osm.bz2.torrent";
+$File::Find::name="/var/www/torrents/earth-20120401130001.osm.bz2.torrent";
 BitTorrent::TrackerCore::process_torrent_files ();
+
+############################
+
 BitTorrent::TrackerCore::read_torrent_file ();
 BitTorrent::TrackerCore::refresh_summary ();
 BitTorrent::TrackerCore::scan_torrent_dir ();
 BitTorrent::TrackerCore::warnerror ();
 
 
+
+
+
+my $ipdotted    = "69.196.183.186";
+use Socket;
+my $ipnetwork   = inet_aton($ipdotted);
+BitTorrent::TrackerCore::convert_ip_ntoa  ($ipnetwork);
+BitTorrent::TrackerCore::html_encode_in_place ("<html> blah </blah>");
+my $is_peer=BitTorrent::TrackerCore::is_peer ($ipnetwork,52122);
+warn "is peer $is_peer";

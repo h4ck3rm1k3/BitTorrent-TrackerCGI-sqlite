@@ -156,7 +156,7 @@ sub bt_scrape {
 
     my $r = shift || confess "missing peer";;
 
-    BitTorrent::TrackerCore::bt_scrape();
+    BitTorrent::TrackerCore::bt_scrape($r);
 
     ## Run cleanup if refresh interval has elapsed.
     check_last_update($r);

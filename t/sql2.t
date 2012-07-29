@@ -15,8 +15,8 @@ CREATE TABLE IF NOT EXISTS test
 
 
 my $sth_summary_ins=$dbh->prepare("INSERT INTO test (sha1) values (?)");	
-my $sha1 = "blah";
+my $sha1 = "blah2";
 $sth_summary_ins->execute($sha1);
 
-$sha1= "Ç;%Ly¬x=R#¶ü<.Cß¯";
+$sha1= "Ç;%L2y¬x=R#¶ü<.Cß¯";
 $sth_summary_ins->execute($sha1);

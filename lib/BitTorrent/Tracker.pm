@@ -1,10 +1,19 @@
 #!/usr/bin/perl -Tw
 # from http://www.gluelogic.com/code/BitTorrent/TrackerCGI.pm
 package BitTorrent::Tracker;
-
-## 
+use strict;
+use warnings;
+use APR::Table ();
+use Apache2::Const -compile => qw(OK DECLINED M_GET M_POST M_OPTIONS HTTP_METHOD_NOT_ALLOWED);
+use Apache2::RequestIO ();
+use Apache2::RequestRec;
+use Bundle::Apache2 ();
+use Carp qw(confess);
+use DBD::SQLite();
+use DBI;
+use Digest::SHA1 ();
+use File::Find ();
 use BitTorrent::TrackerCore;
-
 #use Devel::NYTProf::Apache;
 #use Devel::NYTProf;
 
@@ -41,11 +50,6 @@ use BitTorrent::TrackerCore;
 ##################
 ## config below ##
 ##################
-
-use Apache2::Const -compile => qw(OK DECLINED M_GET M_POST M_OPTIONS HTTP_METHOD_NOT_ALLOWED);
-use Apache2::RequestRec;
-use APR::Table ();
-use Apache2::RequestIO ();
 
 ## TORRENT_BASE_URL, TORRENT_PATH, and the database connection
 ## info MUST be changed. The rest may be left at their defaults.
@@ -97,15 +101,6 @@ use constant BT_DB_INFO	=>[
     { PrintError=>1, RaiseError=>1, AutoCommit=>1 } 
 ];
 
-use strict;
-use warnings;
-
-use DBI ();
-use DBD::SQLite();
-use Digest::SHA1 ();
-use File::Find ();
-use Bundle::Apache2 ();
-
 
 BEGIN {
   use constant MOD_PERL => exists($::ENV{'MOD_PERL'})
@@ -114,6 +109,19 @@ BEGIN {
 	: 1
     : 0;
 
+}
+
+
+## send HTTP 400 Bad Request and error message
+##  bad_request($r, $message)
+sub bad_request {
+    my $r = $_[0];
+    $r->status($_[1]);
+    MOD_PERL > 1
+      ? $r->content_type('text/plain; charset=ISO-8859-1')
+      : $r->send_http_header('text/plain; charset=ISO-8859-1');
+    print STDOUT $_[2],"\nThis resource is for use by BitTorrent clients.\n";
+    return 0; ## Apache::OK
 }
 
 ## send standard headers once ready to speak BitTorrent protocol
@@ -156,7 +164,6 @@ sub bt_scrape {
 
 sub check_last_update {
     my $r=shift|| confess "missing request";;
-    my $now=  shift || confess "missing request time";;
 
     ## Run cleanup if the refresh interval has elapsed.
     ## Clean timed out entries from peer/scc hash tables at regular intervals.
@@ -203,11 +210,9 @@ sub handler {
 	      "$status_line\n";
 	return;
     }
+    my $dbh=BitTorrent::TrackerCore::Connect();
 
-    $dbh = DBI->connect(@{(BT_DB_INFO)})
-      || return bad_request($r, 500, 'Database error.');
-
-    parse_query_string(MOD_PERL ? scalar $r->args : $::ENV{'QUERY_STRING'},
+    BitTorrent::TrackerCore::parse_query_string(MOD_PERL ? scalar $r->args : $::ENV{'QUERY_STRING'},
 		       \%BitTorrent::TrackerCode::cgi);
 
     ## check for path_info type request
@@ -238,26 +243,27 @@ sub handler {
     ## ($x !~ tr/0-9//c is equivalent to $x =~ /^\d+$/)
     ## (negative numbers not allowed with the below tr/0-9//c)
     ## (port numbers not allowed below 1024 for sanity in CHECK_PEER connect()s)
-    defined($cgi{'info_hash'})    && length($cgi{'info_hash'}) == 20
-      && defined($cgi{'peer_id'}) && length($cgi{'peer_id'})   == 20
-      && defined($cgi{'uploaded'})       && $cgi{'uploaded'}   !~ tr/0-9//c
-      && defined($cgi{'downloaded'})     && $cgi{'downloaded'} !~ tr/0-9//c
-      && defined($cgi{'left'})           && $cgi{'left'}       !~ tr/0-9//c
-      && defined($cgi{'port'})           && $cgi{'port'}       =~ /^(\d+)/
-	      && $1 > 1023  && $1 < 65536 && ($cgi{'port'} = $1) # untaint
-      && (!defined($cgi{'ip'})           || length($cgi{'ip'}) < 128)
-      && (!defined($cgi{'last'})         || $cgi{'last'}       !~ tr/0-9//c)
-      && (!defined($cgi{'numwant'})      || $cgi{'numwant'}    !~ tr/0-9//c)
+    my $cgi= \%BitTorrent::TrackerCore::cgi;
+    defined($cgi->{'info_hash'})    && length($cgi->{'info_hash'}) == 20
+      && defined($cgi->{'peer_id'}) && length($cgi->{'peer_id'})   == 20
+      && defined($cgi->{'uploaded'})       && $cgi->{'uploaded'}   !~ tr/0-9//c
+      && defined($cgi->{'downloaded'})     && $cgi->{'downloaded'} !~ tr/0-9//c
+      && defined($cgi->{'left'})           && $cgi->{'left'}       !~ tr/0-9//c
+      && defined($cgi->{'port'})           && $cgi->{'port'}       =~ /^(\d+)/
+	      && $1 > 1023  && $1 < 65536 && ($cgi->{'port'} = $1) # untaint
+      && (!defined($cgi->{'ip'})           || length($cgi->{'ip'}) < 128)
+      && (!defined($cgi->{'last'})         || $cgi->{'last'}       !~ tr/0-9//c)
+      && (!defined($cgi->{'numwant'})      || $cgi->{'numwant'}    !~ tr/0-9//c)
       || return bad_request($r, 400, 'Missing or invalid information.');
 
-    ## (untaint $cgi{'ip'}; it is checked later with Socket::inet_aton resolve)
-    ($cgi{'ip'}) = ($cgi{'ip'} || $r->connection->remote_ip) =~ /^(.+)$/;
-    $cgi{'event'} ||= '';
-    $cgi{'numwant'} = MAX_PEERS
-      if (!defined($cgi{'numwant'}) || $cgi{'numwant'} > MAX_PEERS);
+    ## (untaint $cgi->{'ip'}; it is checked later with Socket::inet_aton resolve)
+    ($cgi->{'ip'}) = ($cgi->{'ip'} || $r->connection->remote_ip) =~ /^(.+)$/;
+    $cgi->{'event'} ||= '';
+    $cgi->{'numwant'} = MAX_PEERS
+      if (!defined($cgi->{'numwant'}) || $cgi->{'numwant'} > MAX_PEERS);
 
     ## check requested action
-    exists(BT_EVENTS->{$cgi{'event'}})
+    exists(BT_EVENTS->{$cgi->{'event'}})
       || return bad_request($r, 400, "Invalid 'event' requested.");
 
     ## send HTTP headers, subsequent errors must be sent via BitTorrent protocol
@@ -265,23 +271,24 @@ sub handler {
 
     ## get torrent info (validate torrent exists in database)
     my $summary_sha1 =
-      $dbh->prepare_cached(QSTR->{'summary_sha1'}, ATTR_USE_RESULT);
+      $dbh->prepare_cached(BitTorrent::TrackerCore::QSTR->{'summary_sha1'}, BitTorrent::TrackerCore::ATTR_USE_RESULT);
     my $torrent =
-      $dbh->selectrow_hashref($summary_sha1, undef, $cgi{'info_hash'})
+      $dbh->selectrow_hashref($summary_sha1, undef, $cgi->{'info_hash'})
       || (!DBI->err
 	   ? return bt_error('Requested torrent not available on this tracker.' 
 			     . ",summary_sha1 :" . $summary_sha1 
-			     . ",info_hash:" . $cgi{'info_hash'}
+			     . ",info_hash:" . $cgi->{'info_hash'}
 	  )
 	   : return bt_error('database error'));
 
     ## get peer info, execute action, and send peers list (if action succeeds)
-    my $info_get = $dbh->prepare_cached(QSTR->{'info_get'}, ATTR_USE_RESULT);
+    my $info_get = $dbh->prepare_cached(BitTorrent::TrackerCore::QSTR->{'info_get'},
+					BitTorrent::TrackerCore::ATTR_USE_RESULT);
     my $peer =
-      $dbh->selectrow_hashref($info_get, undef, $cgi{'peer_id'})
+      $dbh->selectrow_hashref($info_get, undef, $cgi->{'peer_id'})
       || (!DBI->err ? +{} : return bt_error('database error'));
 
-    BT_EVENTS->{$cgi{'event'}}->($peer)
+    BT_EVENTS->{$cgi->{'event'}}->($peer)
       && bt_send_peer_list($torrent);
 
     ## Run cleanup if refresh interval has elapsed.
@@ -310,6 +317,7 @@ sub handler {
 ## Note: MAX_ROWS is only advisory to MySQL to help it choose pointers sizes
 sub Main 
 {
+    my $dbh=BitTorrent::TrackerCore::Connect();
 if (!MOD_PERL && !@ARGV) {
     ## create a pseudo request record to substitute for mod_perl $r
     ## (only valid for the way request_rec is used within this program)
@@ -349,15 +357,6 @@ elsif (!MOD_PERL && $ARGV[0] eq 'refresh') {
     print "Content-type: text/plain; charset=ISO-8859-1\n\n"
       if (exists $::ENV{'GATEWAY_INTERFACE'});
 
-    if (BT_DB_PASS eq 'change_on_install') {
-	print STDERR <<ERR_INST;
-
-Perhaps you did not read the installation instructions.
-You must change the default password in TrackerCGI.pm.  Try again.
-Start simply: security is spelled s-e-c-u-r-i-t-y.  Look it up.
-Hint: among other things, you should never use the default password.
-
-ERR_INST
 	exit(1);
     }
 
@@ -366,80 +365,14 @@ ERR_INST
     ## (If you change the size of bt_names.name VARCHAR(92), you must change
     ##  the places in the file that hard-code this length; just search for "92")
 
-    $dbh = DBI->connect(@{(BT_DB_INFO)})
-      || die('Database error: '.DBI->errstr."\n");
-
-
-$dbh->do(qq{
-CREATE TABLE IF NOT EXISTS bt_names
-(
- size       BIGINT UNSIGNED DEFAULT '0' NOT NULL,
- mark       BIGINT UNSIGNED DEFAULT '0' NOT NULL,
- sha1     CHAR(20) PRIMARY KEY   NOT NULL,
- name  VARCHAR(92) DEFAULT ''           NOT NULL
-)
-	 }) || die('Database error: '.$dbh->errstr."\n");
-
-    $dbh->do(qq{
-CREATE TABLE IF NOT EXISTS bt_summary
-(
-peers     INT UNSIGNED DEFAULT '0' NOT NULL,
-seeds     INT UNSIGNED DEFAULT '0' NOT NULL,
-scc       INT UNSIGNED DEFAULT '0' NOT NULL,
-done      INT UNSIGNED DEFAULT '0' NOT NULL,
-trans  BIGINT UNSIGNED DEFAULT '0' NOT NULL,
-otrans BIGINT UNSIGNED DEFAULT '0' NOT NULL,
-odone     INT UNSIGNED DEFAULT '0' NOT NULL,
-sha1 CHAR(20) PRIMARY KEY   NOT NULL
-)
-    }) || die('Database error: '.$dbh->errstr."\n");
-
-    $dbh->do(qq{
-CREATE TABLE IF NOT EXISTS bt_data
-( 
-pend        BIGINT UNSIGNED DEFAULT '0' NOT NULL,
-upld        BIGINT UNSIGNED DEFAULT '0' NOT NULL,
-dnld        BIGINT UNSIGNED DEFAULT '0' NOT NULL,
-mark TIMESTAMP(14),
-peer_id   CHAR(20) PRIMARY KEY   NOT NULL
-) 
-    }) || die('Database error: '.$dbh->errstr."\n");
-
-    $dbh->do(qq{
-CREATE TABLE IF NOT EXISTS bt_info
-(
-ip          BIGINT UNSIGNED DEFAULT '0' NOT NULL,
-port      SMALLINT UNSIGNED DEFAULT '0' NOT NULL,
-peer_id   CHAR(20) PRIMARY KEY   NOT NULL,
-sha1      CHAR(20)               NOT NULL,
-status    CHAR(4) default 'peer' NOT NULL
-) 
-    }) || die('Database error: '.$dbh->errstr."\n");
-
-
-    $dbh->do(qq{
-CREATE INDEX IF NOT EXISTS  stat_idx ON bt_info(sha1,status)
-
-    }) || die('Database error: '.$dbh->errstr."\n");
-
-#INDEX     stat_idx (sha1,status)
-
-
-
-    $dbh->do(qq{
-CREATE TABLE IF NOT EXISTS bt_mark
-(
-mark      BIGINT UNSIGNED DEFAULT '0' NOT NULL,
-rowid        INT UNSIGNED DEFAULT '0' NOT NULL UNIQUE
-) 
-    }) || die('Database error: '.$dbh->errstr."\n");
+    BitTorrent::TrackerCore::CreateTables();
 
     ## set up torrents in torrents directory
     refresh_summary($^T);
 
     print "\ndone\n\n" unless (exists $::ENV{'CRON'});
 }
-}
+
 
 1;
 __END__

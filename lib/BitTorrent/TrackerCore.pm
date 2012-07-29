@@ -720,6 +720,7 @@ sub Connect
 	    || die 'Database error.';
     }
     die "No database" unless $dbh;
+    return $dbh;
 }
 
 sub refresh_summary {

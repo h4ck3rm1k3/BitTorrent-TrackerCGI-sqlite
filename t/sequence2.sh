@@ -1,0 +1,2 @@
+
+wget "http://localhost/tracker/announce?info_hash=%91%7C6%C5%F3%A5l%0C%F3%11UR%29q%F3%10%BE%0D%C5%14&peer_id=%2DCD0303%2D%82%8E%29X%D2TT%17%2F%2C%E9%DC&port=2706&key=4F02PPW0&event=started&uploaded=0&downloaded=0&left=5246&compact=1&numwant=100" -o announce2.txt -O announceout2.txt

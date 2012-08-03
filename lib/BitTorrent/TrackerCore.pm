@@ -5,14 +5,12 @@ package BitTorrent::TrackerCore;
 #use Devel::NYTProf;
 use strict;
 use warnings;
-
 use DBI ();
 use DBD::SQLite();
 use Digest::SHA1 ();
 use File::Find ();
 use File::Find;
 use Digest::SHA1;
-
 use Carp qw(cluck confess);
 
 #use Bencode qw( bencode  ); #bdecode
@@ -23,8 +21,9 @@ use APR::Table ();
 use Errno ();
 use Fcntl ();
 use Socket;
-
 use Symbol ();
+use Data::Dumper;
+
 our $dbh;
 our @params;
 our %cgi =();
@@ -549,7 +548,7 @@ sub warnerror
 ##  four line routines for e.g. bdecode_string and bdecode_number.  My choice.)
 ## (Numbers should be checked for validity in context of their use, and so 
 ##  checking validity of bencoded numbers is not done here. i-0e and i03e pass.)
-use Data::Dumper;
+
 
 sub bdecode_dict {
     
@@ -1219,7 +1218,7 @@ sub RFC_2822_date {
 ## do not handle multi-values; later keys with same name overwrite earlier.
 sub parse_query_string {
     my $input = shift||'';
-    my $cgi = shift || {};
+    my $cgi = \%cgi;#shift || {};
     my($k,$v);
 #    my $cgi   = $_[1] || {};		# get user-provided %$cgi (if passed)
 #    defined($query)?$query:'';# copy query string because we modify it
@@ -1231,6 +1230,7 @@ sub parse_query_string {
 	$v =~ s/%([\dA-F]{2})/chr(hex $1)/egi;
 	$$cgi{$k} = $v;
     }
+    warn "Got cgi:". Dumper(\%cgi);
     return $cgi;
 }
 

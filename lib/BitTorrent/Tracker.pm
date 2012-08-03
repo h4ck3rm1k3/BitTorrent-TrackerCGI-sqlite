@@ -8,12 +8,14 @@ use Apache2::Const -compile => qw(OK DECLINED M_GET M_POST M_OPTIONS HTTP_METHOD
 use Apache2::RequestIO ();
 use Apache2::RequestRec;
 use Bundle::Apache2 ();
-use Carp qw(confess);
+use Carp qw(confess cluck);
 use DBD::SQLite();
 use DBI;
 use Digest::SHA1 ();
 use File::Find ();
 use BitTorrent::TrackerCore;
+use Data::Dumper;
+
 #use Devel::NYTProf::Apache;
 #use Devel::NYTProf;
 
@@ -115,12 +117,15 @@ BEGIN {
 ## send HTTP 400 Bad Request and error message
 ##  bad_request($r, $message)
 sub bad_request {
-    my $r = $_[0];
-    $r->status($_[1]);
+    my $r = shift|| confess "no request";
+    my $status = shift|| confess "no status";
+    my $string = shift|| confess "no string";
+    cluck "Bad Request";
+    $r->status($status);
     MOD_PERL > 1
       ? $r->content_type('text/plain; charset=ISO-8859-1')
       : $r->send_http_header('text/plain; charset=ISO-8859-1');
-    print STDOUT $_[2],"\nThis resource is for use by BitTorrent clients.\n";
+    print STDOUT $string,"\nThis resource is for use by BitTorrent clients.\n";
     return 0; ## Apache::OK
 }
 
@@ -244,17 +249,58 @@ sub handler {
     ## (negative numbers not allowed with the below tr/0-9//c)
     ## (port numbers not allowed below 1024 for sanity in CHECK_PEER connect()s)
     my $cgi= \%BitTorrent::TrackerCore::cgi;
-    defined($cgi->{'info_hash'})    && length($cgi->{'info_hash'}) == 20
-      && defined($cgi->{'peer_id'}) && length($cgi->{'peer_id'})   == 20
-      && defined($cgi->{'uploaded'})       && $cgi->{'uploaded'}   !~ tr/0-9//c
-      && defined($cgi->{'downloaded'})     && $cgi->{'downloaded'} !~ tr/0-9//c
-      && defined($cgi->{'left'})           && $cgi->{'left'}       !~ tr/0-9//c
-      && defined($cgi->{'port'})           && $cgi->{'port'}       =~ /^(\d+)/
-	      && $1 > 1023  && $1 < 65536 && ($cgi->{'port'} = $1) # untaint
-      && (!defined($cgi->{'ip'})           || length($cgi->{'ip'}) < 128)
-      && (!defined($cgi->{'last'})         || $cgi->{'last'}       !~ tr/0-9//c)
-      && (!defined($cgi->{'numwant'})      || $cgi->{'numwant'}    !~ tr/0-9//c)
-      || return bad_request($r, 400, 'Missing or invalid information.');
+
+
+    foreach my $f (	qw( info_hash  peer_id uploaded downloaded left port last numwant ))  {
+	if (! (defined($cgi->{$f}))) {
+	    warn "Missing field:" . $f;
+	    cluck "Error:" . Dumper($cgi);
+	    return bad_request($r, 400, 'Missing ' . $f)  ;
+	}
+    }
+
+    foreach my $f (	qw(  ip  ))  {
+	if (! (defined($cgi->{$f}))) {
+	    warn "Missing field:" . $f;
+	    cluck "Error:" . Dumper($cgi);
+	    $cgi->{$f}= ""; # default 
+	    #DONT return bad_request($r, 400, 'Missing ' . $f)  ;
+	}
+    }
+    
+    return bad_request($r, 400, 'infohash wrong size.') unless  length($cgi->{'info_hash'}) == 20;
+    return bad_request($r, 400, 'peer_id wrong size.')  unless  length($cgi->{'peer_id'}) == 20;
+    return bad_request($r, 400, 'ip wrong size.')  unless  length($cgi->{'ip'}) < 128;
+
+##
+    foreach my $f (qw(uploaded downloaded left last numwant) )     {
+	return bad_request($r, 400, 'Bad format ' . $f)  unless (
+	    $cgi->{$f}       !~ tr/0-9//c
+	    );
+    }
+    
+    foreach my $f (qw(port) ) {
+	return bad_request($r, 400, 'Bad format ' . $f)  unless (
+	    $cgi->{$f}       =~ /^(\d+)/
+	    && $1 > 1023  
+	    && $1 < 65536 
+	    && ($cgi->{'port'} = $1) # untaint
+	    );
+    }
+    
+
+  
+    # defined($cgi->{'info_hash'})    && length($cgi->{'info_hash'}) == 20
+    #   && defined($cgi->{'peer_id'}) && length($cgi->{'peer_id'})   == 20
+    #   && defined($cgi->{'uploaded'})       && $cgi->{'uploaded'}   !~ tr/0-9//c
+    #   && defined($cgi->{'downloaded'})     && $cgi->{'downloaded'} !~ tr/0-9//c
+    #   && defined($cgi->{'left'})           && $cgi->{'left'}       !~ tr/0-9//c
+    #   && defined($cgi->{'port'})           && $cgi->{'port'}       =~ /^(\d+)/
+    # 	      && $1 > 1023  && $1 < 65536 && ($cgi->{'port'} = $1) # untaint
+    #   && (!defined($cgi->{'ip'})           || length($cgi->{'ip'}) < 128)
+    #   && (!defined($cgi->{'last'})         || $cgi->{'last'}       !~ tr/0-9//c)
+    #   && (!defined($cgi->{'numwant'})      || $cgi->{'numwant'}    !~ tr/0-9//c)
+    #   || return bad_request($r, 400, 'Missing or invalid information.');
 
     ## (untaint $cgi->{'ip'}; it is checked later with Socket::inet_aton resolve)
     ($cgi->{'ip'}) = ($cgi->{'ip'} || $r->connection->remote_ip) =~ /^(.+)$/;

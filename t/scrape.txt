@@ -1,0 +1,11 @@
+--2012-07-23 17:44:26--  http://localhost//tracker/scrape?info_hash=%96%0F%B5%EBV%E2%A8V%DC%21k%82%FD%FD%A0%E8%8B%C0%BB%FF
+Auflösen des Hostnamen localhost... ::1, 127.0.0.1
+Verbindungsaufbau zu localhost|::1|:80... verbunden.
+HTTP-Anforderung gesendet, warte auf Antwort... 200 OK
+Länge: nicht spezifiziert [application/octet-stream]
+In »scrapeout.txt« speichern.
+
+     0K                                                        1,26M=0s
+
+2012-07-23 17:44:27 (1,26 MB/s) - »scrapeout.txt« gespeichert [11]
+

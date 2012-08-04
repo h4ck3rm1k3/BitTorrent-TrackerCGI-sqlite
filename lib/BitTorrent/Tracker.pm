@@ -13,7 +13,7 @@ use DBD::SQLite();
 use DBI;
 use Digest::SHA1 ();
 use File::Find ();
-use BitTorrent::TrackerCore;
+use BitTorrent::TrackerCore qw(bt_error Connect bt_scrape parse_query_string %cgi QSTR ATTR_USE_RESULT CreateTables);
 use Data::Dumper;
 
 #use Devel::NYTProf::Apache;
@@ -161,7 +161,7 @@ sub bt_scrape {
 
     my $r = shift || confess "missing peer";;
 
-    BitTorrent::TrackerCore::bt_scrape($r);
+    bt_scrape($r);
 
     ## Run cleanup if refresh interval has elapsed.
     check_last_update($r);
@@ -215,9 +215,9 @@ sub handler {
 	      "$status_line\n";
 	return;
     }
-    my $dbh=BitTorrent::TrackerCore::Connect();
+    my $dbh=Connect();
 
-    BitTorrent::TrackerCore::parse_query_string(MOD_PERL ? scalar $r->args : $::ENV{'QUERY_STRING'},
+    parse_query_string(MOD_PERL ? scalar $r->args : $::ENV{'QUERY_STRING'},
 		       \%BitTorrent::TrackerCode::cgi);
 
     ## check for path_info type request
@@ -248,10 +248,10 @@ sub handler {
     ## ($x !~ tr/0-9//c is equivalent to $x =~ /^\d+$/)
     ## (negative numbers not allowed with the below tr/0-9//c)
     ## (port numbers not allowed below 1024 for sanity in CHECK_PEER connect()s)
-    my $cgi= \%BitTorrent::TrackerCore::cgi;
+    my $cgi= \%cgi;
 
 
-    foreach my $f (	qw( info_hash  peer_id uploaded downloaded left port last numwant ))  {
+    foreach my $f (	qw( info_hash  peer_id uploaded downloaded left port   ))  {
 	if (! (defined($cgi->{$f}))) {
 	    warn "Missing field:" . $f;
 	    cluck "Error:" . Dumper($cgi);
@@ -259,11 +259,24 @@ sub handler {
 	}
     }
 
-    foreach my $f (	qw(  ip  ))  {
+    # default value 
+    $cgi->{'numwant'} = MAX_PEERS
+      if (!defined($cgi->{'numwant'}) || $cgi->{'numwant'} > MAX_PEERS);
+
+
+    {
+	my $f = 'ip';
 	if (! (defined($cgi->{$f}))) {
 	    warn "Missing field:" . $f;
-	    cluck "Error:" . Dumper($cgi);
-	    $cgi->{$f}= ""; # default 
+	    ($cgi->{'ip'}) = ($cgi->{'ip'} || $r->connection->remote_ip) =~ /^(.+)$/;
+	}
+    }
+
+    {
+	my $f = 'last';
+	if (! (defined($cgi->{$f}))) {
+	    warn "Missing field:" . $f;
+	    $cgi->{$f}= "0"; # default 
 	    #DONT return bad_request($r, 400, 'Missing ' . $f)  ;
 	}
     }
@@ -303,10 +316,8 @@ sub handler {
     #   || return bad_request($r, 400, 'Missing or invalid information.');
 
     ## (untaint $cgi->{'ip'}; it is checked later with Socket::inet_aton resolve)
-    ($cgi->{'ip'}) = ($cgi->{'ip'} || $r->connection->remote_ip) =~ /^(.+)$/;
+
     $cgi->{'event'} ||= '';
-    $cgi->{'numwant'} = MAX_PEERS
-      if (!defined($cgi->{'numwant'}) || $cgi->{'numwant'} > MAX_PEERS);
 
     ## check requested action
     exists(BT_EVENTS->{$cgi->{'event'}})
@@ -317,7 +328,7 @@ sub handler {
 
     ## get torrent info (validate torrent exists in database)
     my $summary_sha1 =
-      $dbh->prepare_cached(BitTorrent::TrackerCore::QSTR->{'summary_sha1'}, BitTorrent::TrackerCore::ATTR_USE_RESULT);
+      $dbh->prepare_cached(QSTR->{'summary_sha1'}, ATTR_USE_RESULT);
     my $torrent =
       $dbh->selectrow_hashref($summary_sha1, undef, $cgi->{'info_hash'})
       || (!DBI->err
@@ -328,8 +339,8 @@ sub handler {
 	   : return bt_error('database error'));
 
     ## get peer info, execute action, and send peers list (if action succeeds)
-    my $info_get = $dbh->prepare_cached(BitTorrent::TrackerCore::QSTR->{'info_get'},
-					BitTorrent::TrackerCore::ATTR_USE_RESULT);
+    my $info_get = $dbh->prepare_cached(QSTR->{'info_get'},
+					ATTR_USE_RESULT);
     my $peer =
       $dbh->selectrow_hashref($info_get, undef, $cgi->{'peer_id'})
       || (!DBI->err ? +{} : return bt_error('database error'));
@@ -363,7 +374,7 @@ sub handler {
 ## Note: MAX_ROWS is only advisory to MySQL to help it choose pointers sizes
 sub Main 
 {
-    my $dbh=BitTorrent::TrackerCore::Connect();
+    my $dbh=Connect();
 if (!MOD_PERL && !@ARGV) {
     ## create a pseudo request record to substitute for mod_perl $r
     ## (only valid for the way request_rec is used within this program)
@@ -411,7 +422,7 @@ elsif (!MOD_PERL && $ARGV[0] eq 'refresh') {
     ## (If you change the size of bt_names.name VARCHAR(92), you must change
     ##  the places in the file that hard-code this length; just search for "92")
 
-    BitTorrent::TrackerCore::CreateTables();
+    CreateTables();
 
     ## set up torrents in torrents directory
     refresh_summary($^T);

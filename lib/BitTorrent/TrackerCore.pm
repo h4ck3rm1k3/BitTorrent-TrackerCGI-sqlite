@@ -13,6 +13,11 @@ use File::Find;
 use Digest::SHA1;
 use Carp qw(cluck confess);
 
+require Exporter;
+our @ISA = qw(Exporter);
+our @EXPORT_OK = qw(bt_error Connect bt_scrape parse_query_string %cgi QSTR ATTR_USE_RESULT CreateTables);
+
+
 #use Bencode qw( bencode  ); #bdecode
 #use Convert::Bencode qw( bencode bdecode); #
 use Convert::Bencode_XS qw(bencode bdecode);

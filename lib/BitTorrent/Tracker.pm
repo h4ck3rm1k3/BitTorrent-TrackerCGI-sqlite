@@ -13,7 +13,7 @@ use DBD::SQLite();
 use DBI;
 use Digest::SHA1 ();
 use File::Find ();
-use BitTorrent::TrackerCore qw(bt_error Connect bt_scrape parse_query_string %cgi QSTR ATTR_USE_RESULT CreateTables);
+use BitTorrent::TrackerCore qw(bt_error Connect  parse_query_string %cgi QSTR ATTR_USE_RESULT CreateTables);
 use Data::Dumper;
 
 #use Devel::NYTProf::Apache;
@@ -161,7 +161,7 @@ sub bt_scrape {
 
     my $r = shift || confess "missing peer";;
 
-    bt_scrape($r);
+    BitTorrent::TrackerCore::bt_scrape($r);
 
     ## Run cleanup if refresh interval has elapsed.
     check_last_update($r);
@@ -327,8 +327,24 @@ sub handler {
     send_bt_http_headers($r);
 
     ## get torrent info (validate torrent exists in database)
+    warn "Going to prepare db:" . QSTR->{'summary_sha1'} . "\n";
+    if (DBI->err) {
+	warn  "Database error:". DBI->err;
+    }
+
     my $summary_sha1 =
       $dbh->prepare_cached(QSTR->{'summary_sha1'}, ATTR_USE_RESULT);
+
+    if ($summary_sha1->err) {
+	warn  "Database error:". $summary_sha1->err;
+    }
+
+    warn "Going to look for SHA:" .
+	$summary_sha1 .  
+	" info hash:".  $cgi->{'info_hash'} ."in the database\n";
+
+    #if ($sth->err) warn  "Database error:". $sth->err;
+
     my $torrent =
       $dbh->selectrow_hashref($summary_sha1, undef, $cgi->{'info_hash'})
       || (!DBI->err
@@ -337,6 +353,10 @@ sub handler {
 			     . ",info_hash:" . $cgi->{'info_hash'}
 	  )
 	   : return bt_error('database error'));
+
+    if (DBI->err){
+	warn  "Database error:". DBI->err;
+    }
 
     ## get peer info, execute action, and send peers list (if action succeeds)
     my $info_get = $dbh->prepare_cached(QSTR->{'info_get'},

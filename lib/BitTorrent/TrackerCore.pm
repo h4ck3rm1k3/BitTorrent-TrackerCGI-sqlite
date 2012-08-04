@@ -1235,7 +1235,7 @@ sub parse_query_string {
 	$v =~ s/%([\dA-F]{2})/chr(hex $1)/egi;
 	$$cgi{$k} = $v;
     }
-    warn "Got cgi:". Dumper(\%cgi);
+#    warn "Got cgi:". Dumper(\%cgi);
     return $cgi;
 }
 

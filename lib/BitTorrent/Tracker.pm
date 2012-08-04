@@ -13,7 +13,7 @@ use DBD::SQLite();
 use DBI;
 use Digest::SHA1 ();
 use File::Find ();
-use BitTorrent::TrackerCore qw(bt_error Connect  parse_query_string %cgi QSTR ATTR_USE_RESULT CreateTables);
+use BitTorrent::TrackerCore qw(bt_error Connect  parse_query_string %cgi QSTR ATTR_USE_RESULT CreateTables summary_sha1 BT_EVENTS bt_send_peer_list bt_peer_started bt_peer_stopped bt_peer_progress refresh_summary);
 use Data::Dumper;
 
 #use Devel::NYTProf::Apache;
@@ -145,14 +145,6 @@ sub send_bt_http_headers {
     binmode(STDOUT,':raw') unless (MOD_PERL);
 }
 
-## map of event keys to coderefs (subroutines)
-use constant BT_EVENTS =>
-  {
-    'started'	=> \&bt_peer_started,
-    'stopped'	=> \&bt_peer_stopped,
-    'completed'	=> \&bt_peer_progress,
-    ''		=> \&bt_peer_progress
-  };
 
 #our($dbh,%cgi,@params);
 
@@ -180,7 +172,8 @@ sub check_last_update {
     my $now = $r->request_time;
     if ($BitTorrent::TrackerCGI::mark < $now - REFRESH_INTERVAL) {
 	$r->rflush();
-	close(STDOUT);  ## no keepalive requests; finish connection quickly
+#	close(STDOUT);  ## no keepalive requests; finish connection quickly 
+	# causes : Filehandle STDOUT reopened as GEN0 only for input
 	refresh_summary($now);
     }
 }
@@ -205,17 +198,19 @@ sub handler {
 	$r->uri =~ m|^/tracker(.*)|
 	  && $r->path_info($1);
     }
-    elsif (uc($::ENV{'REQUEST_METHOD'}) ne 'GET') {
+    elsif (uc($::ENV{'REQUEST_METHOD'}) ne 'GET') 
+    {
 	my $status_line = uc($::ENV{'REQUEST_METHOD'}) eq 'OPTIONS'
-	  ? '200 OK'
-	  : '405 Method Not Allowed';
+	    ? '200 OK'
+	    : '405 Method Not Allowed';
 	print "Status: $status_line\n",
-	      "Allow: GET, HEAD, OPTIONS\n",
-	      "Content-type: text/plain; charset=ISO-8859-1\n\n",
-	      "$status_line\n";
+	"Allow: GET, HEAD, OPTIONS\n",
+	"Content-type: text/plain; charset=ISO-8859-1\n\n",
+	"$status_line\n";
 	return;
     }
-    my $dbh=Connect();
+    
+    my $dbh = BitTorrent::TrackerCore::Connect();
 
     parse_query_string(MOD_PERL ? scalar $r->args : $::ENV{'QUERY_STRING'},
 		       \%BitTorrent::TrackerCode::cgi);
@@ -300,27 +295,11 @@ sub handler {
 	    && ($cgi->{'port'} = $1) # untaint
 	    );
     }
-    
-
-  
-    # defined($cgi->{'info_hash'})    && length($cgi->{'info_hash'}) == 20
-    #   && defined($cgi->{'peer_id'}) && length($cgi->{'peer_id'})   == 20
-    #   && defined($cgi->{'uploaded'})       && $cgi->{'uploaded'}   !~ tr/0-9//c
-    #   && defined($cgi->{'downloaded'})     && $cgi->{'downloaded'} !~ tr/0-9//c
-    #   && defined($cgi->{'left'})           && $cgi->{'left'}       !~ tr/0-9//c
-    #   && defined($cgi->{'port'})           && $cgi->{'port'}       =~ /^(\d+)/
-    # 	      && $1 > 1023  && $1 < 65536 && ($cgi->{'port'} = $1) # untaint
-    #   && (!defined($cgi->{'ip'})           || length($cgi->{'ip'}) < 128)
-    #   && (!defined($cgi->{'last'})         || $cgi->{'last'}       !~ tr/0-9//c)
-    #   && (!defined($cgi->{'numwant'})      || $cgi->{'numwant'}    !~ tr/0-9//c)
-    #   || return bad_request($r, 400, 'Missing or invalid information.');
-
-    ## (untaint $cgi->{'ip'}; it is checked later with Socket::inet_aton resolve)
 
     $cgi->{'event'} ||= '';
 
     ## check requested action
-    exists(BT_EVENTS->{$cgi->{'event'}})
+    exists(BitTorrent::TrackerCore::BT_EVENTS->{$cgi->{'event'}})
       || return bad_request($r, 400, "Invalid 'event' requested.");
 
     ## send HTTP headers, subsequent errors must be sent via BitTorrent protocol
@@ -341,22 +320,19 @@ sub handler {
 
     warn "Going to look for SHA:" .
 	$summary_sha1 .  
-	" info hash:".  $cgi->{'info_hash'} ."in the database\n";
+	" info hash:".  unpack("H*",$cgi->{'info_hash'}) ."in the database\n";
 
     #if ($sth->err) warn  "Database error:". $sth->err;
 
-    my $torrent =
-      $dbh->selectrow_hashref($summary_sha1, undef, $cgi->{'info_hash'})
-      || (!DBI->err
-	   ? return bt_error('Requested torrent not available on this tracker.' 
-			     . ",summary_sha1 :" . $summary_sha1 
-			     . ",info_hash:" . $cgi->{'info_hash'}
-	  )
-	   : return bt_error('database error'));
+    my $torrent =summary_sha1($cgi->{'info_hash'}) || (
+	!DBI->err
+	? return bt_error('Requested torrent not available on this tracker.' 
+			  . ",summary_sha1 :" . unpack("H*",$summary_sha1 )
+			  . ",info_hash:" . unpack("H*",$cgi->{'info_hash'})
+	)
+	: return bt_error('database error')
+	);
 
-    if (DBI->err){
-	warn  "Database error:". DBI->err;
-    }
 
     ## get peer info, execute action, and send peers list (if action succeeds)
     my $info_get = $dbh->prepare_cached(QSTR->{'info_get'},
@@ -365,7 +341,7 @@ sub handler {
       $dbh->selectrow_hashref($info_get, undef, $cgi->{'peer_id'})
       || (!DBI->err ? +{} : return bt_error('database error'));
 
-    BT_EVENTS->{$cgi->{'event'}}->($peer)
+    BitTorrent::TrackerCore::BT_EVENTS->{$cgi->{'event'}}->($peer)
       && bt_send_peer_list($torrent);
 
     ## Run cleanup if refresh interval has elapsed.

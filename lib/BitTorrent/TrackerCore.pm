@@ -15,12 +15,14 @@ use Carp qw(cluck confess);
 
 require Exporter;
 our @ISA = qw(Exporter);
-our @EXPORT_OK = qw(bt_error Connect bt_scrape parse_query_string %cgi QSTR ATTR_USE_RESULT CreateTables);
+our @EXPORT_OK = qw(bt_error Connect bt_scrape parse_query_string %cgi QSTR ATTR_USE_RESULT CreateTables summary_sha1 BT_EVENTS bt_send_peer_list bt_peer_started bt_peer_stopped bt_peer_progress refresh_summary);
 
 
 #use Bencode qw( bencode  ); #bdecode
 #use Convert::Bencode qw( bencode bdecode); #
-use Convert::Bencode_XS qw(bencode bdecode);
+#use Convert::Bencode_XS qw(bencode bdecode);
+use Convert::Bencode_XS qw(bencode );
+use Bencode qw( bdecode);
 
 use APR::Table ();
 use Errno ();
@@ -162,6 +164,32 @@ use constant QSTR =>
 #sub bin2hex { unpack('H*',$_[0]) }   ##  bin2hex($binary_string)
 #sub hex2bin {   pack('H*',$_[0]) }   ##  hex2bin($hex_string)
 
+sub summary_sha1 {
+    my $info_hash=shift;
+
+    my $dbh=Connect();
+    warn "Going to prepare db:" . QSTR->{'summary_sha1'} . "\n";
+    if (DBI->err) {	warn  "Database error:". DBI->err;    }
+    my $summary_sha1 =      $dbh->prepare_cached(QSTR->{'summary_sha1'}, ATTR_USE_RESULT);
+    if ($summary_sha1->err) {	warn  "Database error:". $summary_sha1->err;    }
+    warn "Going to look for SHA:" .	$summary_sha1 .  " info hash:".  unpack("H*",$info_hash) ."in the database\n";
+    my $torrent =      $dbh->selectrow_hashref($summary_sha1, undef, $info_hash);
+    
+    if ($torrent) {
+	return $torrent;
+    } else {
+	if (!DBI->err)    {
+	    warn "Database error " . DBI->err;
+	    return undef;
+	} else {
+	    warn 'not available on this tracker.' 
+		. ",summary_sha1 :" . unpack("H*",$summary_sha1 )
+		. ",info_hash:" . unpack("H*",$info_hash);	
+	    return undef;
+	}
+    }
+}
+
 sub setcgi
 {
 #    warn Dumper(@_);
@@ -180,10 +208,10 @@ sub bt_error {
 ## map of event keys to coderefs (subroutines)
 use constant BT_EVENTS =>
   {
-    'started'	=> \&bt_peer_started,
-    'stopped'	=> \&bt_peer_stopped,
-    'completed'	=> \&bt_peer_progress,
-    ''		=> \&bt_peer_progress
+    'started'	=> \&BitTorrent::TrackerCore::bt_peer_started,
+    'stopped'	=> \&BitTorrent::TrackerCore::bt_peer_stopped,
+    'completed'	=> \&BitTorrent::TrackerCore::bt_peer_progress,
+    ''		=> \&BitTorrent::TrackerCore::bt_peer_progress
   };
 
 
@@ -191,8 +219,10 @@ use constant BT_EVENTS =>
 sub convert_ip_ntoa 
 {
     my $ip=shift;
+    warn "convert_ip_ntoa :" . 	Dumper($ip) .	
+	":" . unpack("H*",$ip) ;
     my $peer_addr = inet_ntoa($ip);
-    warn "convert_ip_ntoa :" . $ip  . " -> ". $peer_addr;
+    warn "convert_ip_ntoa :" . unpack("H*",$ip)   . " -> ". $peer_addr;
     return $peer_addr;
 }
 
@@ -255,17 +285,37 @@ sub bt_send_peer_list {
 	    }
 	}
 	$cgi{'last'} = $offset;
-	my $sth = $cgi{'left'} != 0
+
+
+	my $sth = 
+	    $cgi{'left'} != 0
 	    ## peers and scc get those with status 'seed' and status 'peer'
-	  ? $dbh->prepare_cached(QSTR->{'pgroup_not_scc'}, ATTR_USE_RESULT)
+	    ? $dbh->prepare_cached(QSTR->{'pgroup_not_scc'}, ATTR_USE_RESULT)
 	    ## seeds get only those with status 'peer'
-	  : $dbh->prepare_cached(QSTR->{'pgroup_only_peers'}, ATTR_USE_RESULT);
-	$sth->bind_param(2, $offset, {TYPE=>DBI::SQL_INTEGER})
-	  && $sth->bind_param(3, $numwant, {TYPE=>DBI::SQL_INTEGER})
-	  && $sth->execute($cgi{'info_hash'}, $offset, $numwant)
-	  && ($peers = map { convert_ip_ntoa($_) } $sth->fetchall_arrayref({}));
-	$sth->err
-	  && return bt_error('database error');
+	    : $dbh->prepare_cached(QSTR->{'pgroup_only_peers'}, ATTR_USE_RESULT);
+
+
+	$sth->bind_param(2, $offset, {TYPE=>DBI::SQL_INTEGER});
+	$sth->err  && return bt_error('database error');
+
+	$sth->bind_param(3, $numwant, {TYPE=>DBI::SQL_INTEGER});
+	$sth->err  && return bt_error('database error');
+
+	$sth->execute($cgi{'info_hash'}, $offset, $numwant);
+	$sth->err  && return bt_error('database error');
+
+	
+	foreach my $obj (@{$sth->fetchall_arrayref()})
+	{
+#	    warn "OBJ:".  Dumper($obj);
+	    push @{$peers}, convert_ip_ntoa($obj->[0]);
+	}
+
+	warn "Peers:". Dumper($peers);
+
+	$sth->err  && return bt_error('database error');
+
+
     }
 
     print STDOUT ${bencode_dict({ 'done peers' => $$torrent{'seeds'},
@@ -564,9 +614,16 @@ sub bdecode_dict {
     }
     else
     {
-#	warn "Check:" . Dumper($arg);
+#	warn "Check:" . unpack("H*",$arg);
+	warn "Check type:" . ref($arg);
+	warn "Check Len:" . length($arg);
+#	warn "Check Start:" . unpack("H*",substr($arg,0,10));
     }
+    open OUT,">test.txt";
+    print OUT $arg;
+    close OUT;
     my $t2= bdecode($arg);
+
 #    warn Dumper($t2);
 
 # $VAR1 = {
@@ -654,9 +711,10 @@ sub is_peer {
     ## 'man 2 connect' for nonblocking methodology with EINPROGRESS
     ## timeout after 5 seconds (modify time in select() below to change this)
 
-    warn "Going to try and connect to port :$port and iaddr:$iaddr\n" if $debug;
+    warn "Going to try and connect to port :$port and iaddr:"
+	. unpack("H*",$iaddr) . "\n" if $debug;
     my $x=Socket::sockaddr_in($port, $iaddr);
-    warn "Got socket: $x" if $debug;
+    warn "Got socket: " . unpack("H*",$x) if $debug;
     connect($SH, $x)
       || $! == Errno::EINPROGRESS
       || return 0;
@@ -743,17 +801,22 @@ sub refresh_summary {
     Connect();
     my $mark = $dbh->selectrow_array("SELECT mark FROM bt_mark WHERE rowid=0")
       || 0;
-    die unless $mark;
+    if (!$mark)
+    {
+	warn "No Mark";
+	$mark=0;
+    }
     die unless $now;
     
     if (
 	! 
 	(($mark < ($now - REFRESH_INTERVAL)
-	 || (@ARGV && $ARGV[0] eq 'force-refresh')))
+	 ))
 	)
     {
-	warn "problem";
-	return;
+	warn "problem mark:$mark < $now - " . REFRESH_INTERVAL . "\n";
+	# we would return here to prevent from refreshing to often.
+	#return;
     }
 
 #     && $dbh->do("LOCK TABLES bt_summary WRITE")
@@ -904,12 +967,34 @@ sub scan_torrent_dir {
 	     "seeds=$$c{'seed'} scc=$$c{'scc'}\n");
 	## (cascade_on_delete would have been nicer)
 	## (MySQL also does not support multi-table delete until v4.0.0)
+
+
+	warn("call delete on sha1=".unpack('H*',$sha1));
+	
 	$sth_summary_del->execute($sha1);
+	if (DBI->err) {	warn  "Database error:". DBI->err;    }
+
 	$sth_names_del->execute($sha1);
+	if (DBI->err) {	warn  "Database error:". DBI->err;    }
+
 	$sth_info_sel->execute($sha1);
+	if (DBI->err) {	warn  "Database error:". DBI->err;    }
+
 	$sth_data_del->execute($_) foreach ($sth_info_sel->fetchrow_array());
+	if (DBI->err) {	warn  "Database error:". DBI->err;    }
+
 	$sth_info_del->execute($sha1);
+	if (DBI->err) {	warn  "Database error:". DBI->err;    }
+
     }
+
+    warn "Review ". join( ",",
+			  map {
+			      unpack('H*',$_)	
+			  } keys %torrents);
+
+    #warn "Review ". Dumper(\%torrents);
+
 }
 
 
@@ -934,12 +1019,26 @@ sub process_torrent_files {
 	warn "$path is a link";
 	return;
     }
+    elsif (-d $path)
+    {
+#	warn "$path is a dir";
+	return;
+    }
     
+    if ($name =~ /\.inc$/)
+    {
+	return;
+    }
+
     my $metainfo = read_torrent_file($name);
+    
     if (!$metainfo) {
 	print STDERR "$name cannot be read\n";
 	return; ## (torrents that become unreadable will be deleted from db!)
     }
+
+    warn "metainfo:" .  Dumper(keys %{$metainfo});
+
     if (! $$metainfo{'announce'} eq TRACKER_URL )
     {
 	print STDERR 
@@ -954,6 +1053,8 @@ sub process_torrent_files {
     my $sha1 = Digest::SHA1::sha1(${bencode_dict($$metainfo{'info'})});
     my($torrents,$counts) = @params[0,1];
     if (exists $$torrents{$sha1}) {
+
+	warn "Found " . unpack("H*",$sha1) . " for $name, deleting it from the torrents hash";
 	delete $$torrents{$sha1};
     }
     else {
@@ -968,11 +1069,21 @@ sub process_torrent_files {
 
 	confess "missing sth_summary_ins" unless $sth_summary_ins;
 #	warn Dumper($sth_summary_ins);
-	warn "going to add $sha1";
-	$sth_summary_ins->execute($sha1);
 
+	my $torrent = summary_sha1($sha1);
+	if (!$torrent)
+	{
+	    warn "going to add " . unpack("H*",$sha1) . " for $name";
+	    $sth_summary_ins->execute($sha1); # INSERT INTO bt_summary (sha1) values (?)
+	    $sth_names_ins->execute($size,$now,$sha1,$$metainfo{'info'}->{'name'});
 
-	$sth_names_ins->execute($size,$now,$sha1,$$metainfo{'info'}->{'name'});
+	}
+	else
+
+	{
+	    warn "Found torrent:" . Dumper($torrent)  . ", SHA:" . unpack("H*",$sha1) . " for $name";
+	}
+
 	@{$$metainfo{'info'}}{'sha1','size','avg_rate','avg_progress'} =
 	  ($sha1,$size,0,0);
 	$$counts{$sha1} = $$metainfo{'info'};
@@ -996,8 +1107,11 @@ sub read_torrent_file {
 #    warn "check name: \"$torrent_path\"\n";
 
     if ($torrent_path !~ m/\.torrent$/) {
-	warn " wrong name \"$torrent_path\" ";
-	return;
+	if (-f $torrent_path)
+	{
+	    warn " wrong name \"$torrent_path\" ";
+	    return;
+	}
     }
 
 #    if ($torrent_path !~ m%^\.{1,2}/|/\.{1,2}/|/\.{1,2}$|\0%) 
@@ -1033,7 +1147,8 @@ sub read_torrent_file {
 
 ## simple html_encode in-place over arg
 sub html_encode_in_place {
-    my $html = shift || confess "missing html";
+    my $html = shift;
+    confess "missing html" unless defined($html);
 
     $html=~s/&/&amp;/g;
     $html=~s/</&lt;/g;
@@ -1084,10 +1199,23 @@ TORRENT_STATS
 	     keys %$stats) {
 	$c = $$stats{$_};
 	$path = $$c{'torrent_path'};
+
+	warn "path:$path";
+#	warn Dumper( keys %{$c});
+#$VAR7 = 'pieces';
+
+	warn "SHA1:". unpack('H*', $c->{'sha1'});;
+	foreach my $n ( 'name', 'size', 'mark','length','piece length', 'torrent_path', 'avg_rate','avg_progress')
+	{
+	    warn "Field : $n:".$c->{$n};
+	}
+
+
 	($nfo = $path) =~ s/\.torrent$//;
 	$nfo  = (-e TORRENT_PATH.$nfo.'.html') ? $nfo.'.html' :
 		(-e TORRENT_PATH.$nfo.'.txt')  ? $nfo.'.txt'  :
 		(-e TORRENT_PATH.$nfo.'.nfo')  ? $nfo.'.nfo'  : '';
+#	warn "nfo:$nfo path:$path";
 	html_encode_in_place($nfo);
 	$nfo = qq{<a href="$nfo">}.INFO_IMG.'</a>' if ($nfo ne '');
 	$$c{'name'} || (($$c{'name'}) = $path =~ m|([^/]+)$|);

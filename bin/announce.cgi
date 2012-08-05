@@ -1,4 +1,4 @@
 #!/usr/bin/perl -T
-use lib "/home/mdupont/experiments/fosm/tracker/BitTorrent-TrackerCGI-sqlite/lib";
+use lib "/pine02/www/tracker/BitTorrent-TrackerCGI-sqlite/lib";
 #use BitTorrent::TrackerCGI;
 #print "Hello";

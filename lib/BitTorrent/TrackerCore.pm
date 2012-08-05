@@ -15,7 +15,7 @@ use Carp qw(cluck confess);
 
 require Exporter;
 our @ISA = qw(Exporter);
-our @EXPORT_OK = qw(bt_error Connect bt_scrape parse_query_string %cgi QSTR ATTR_USE_RESULT CreateTables summary_sha1 BT_EVENTS bt_send_peer_list bt_peer_started bt_peer_stopped bt_peer_progress refresh_summary);
+our @EXPORT_OK = qw(bt_error Connect bt_scrape parse_query_string %cgi QSTR ATTR_USE_RESULT CreateTables summary_sha1 BT_EVENTS bt_send_peer_list bt_peer_started bt_peer_stopped bt_peer_progress refresh_summary REFRESH_INTERVAL MAX_PEERS TORRENT_BASE_URL);
 
 
 #use Bencode qw( bencode  ); #bdecode
@@ -80,7 +80,7 @@ use constant TORRENT_BASE_URL	=> 'http://localhost/torrents';
 use constant TRACKER_URL	=> 'http://localhost/tracker/announce';
 
 ## Filesystem path under which to find .torrent files (MUST end with '/')
-use constant TORRENT_PATH	=> '/var/www/torrents/';
+use constant TORRENT_PATH	=> '/pine02/www/torrents/';
 ## Path to which to write torrent statistics HTML table
 use constant TORRENT_STATS_FILE	=> TORRENT_PATH.'bt_stats.inc';
 ## Path to which to write torrent RSS XML <item>s
@@ -111,17 +111,17 @@ use constant INFO_IMG		=> 'i';
 ## 2004.11.08  v0.02  code()gluelogic.com
 ##   fixed code that generates RSS to properly generate <enclosure> tag
 ##     (thx David (labarks at comcast))
-$BitTorrent::TrackerCGI::VERSION || 1;          # (eliminate Perl warning)
-$BitTorrent::TrackerCGI::VERSION  = 0.02;
+## 2012.08.05 v0.03 hacked by James Michael DuPont<jamesmikedupont@gmail.com>
+
+$BitTorrent::TrackerCore::VERSION || 1;          # (eliminate Perl warning)
+$BitTorrent::TrackerCore::VERSION  = 0.03;
 
 ## array ref for convenience and to ensure same settings used on all connect()s
 use constant BT_DB_INFO	=>[
-    'DBI:SQLite:database=/var/www/tracker/bittracker.sqlite',
+    'DBI:SQLite:database=/pine02/var/bittracker.sqlite',
     "", "",
     { PrintError=>1, RaiseError=>1, AutoCommit=>1 } 
 ];
-
-
 
 BEGIN {
 
@@ -1177,7 +1177,7 @@ sub print_stats {
     my $ns = "xmlns:bt=\"http://pine02.fosm.org/torrents/bt.xml\" ";
 
     print $RSS "<?xml version=\"1.0\" encoding=\"UTF-8\" ?>\n<rss version=\"2.0\" $ns>\n<channel>\n";
-    print $RSS "  <generator>BitTorrent::TrackerCGI (v",  $BitTorrent::TrackerCGI::VERSION,")</generator>\n";
+    print $RSS "  <generator>BitTorrent::TrackerCGI (v",  $BitTorrent::TrackerCore::VERSION,")</generator>\n";
 
     print $FH <<"TORRENT_STATS";
 <style>

@@ -1,0 +1,33 @@
+#Alias /tracker /pine02/www/tracker/BitTorrent-TrackerCGI-sqlite/bin/
+AddHandler perl-script .cgi
+#PerlSwitches -T 
+
+# <Location /tracker>
+#     SetHandler perl-script
+#     PerlHandler BitTorrent::Tracker
+# </Location>
+
+AddType application/x-bittorrent .torrent
+AddType text/html .shtml
+AddType text/xml .xml
+AddHandler server-parsed .shtml .xml
+# ExpiresActive on
+# ExpiresDefault A900
+# ExpiresByType application/x-bittorrent A3600
+
+#<Directory "/pine02/www/tracker/BitTorrent-TrackerCGI-sqlite/bin/">
+	SetHandler perl-script
+#	AllowOverride None
+	Options +ExecCGI -MultiViews +SymLinksIfOwnerMatch	
+	Order allow,deny
+	Allow from all
+	PerlSendHeader On
+	PerlResponseHandler ModPerl::Registry
+#</Directory>  
+
+#PerlRequire /pine02/www/tracker/BitTorrent-TrackerCGI-sqlite/bin/startup.pl
+    
+#PerlModule Apache2::Reload
+#PerlInitHandler Apache2::Reload		
+
+

@@ -13,7 +13,7 @@ use DBD::SQLite();
 use DBI;
 use Digest::SHA1 ();
 use File::Find ();
-use BitTorrent::TrackerCore qw(bt_error Connect  parse_query_string %cgi QSTR ATTR_USE_RESULT CreateTables summary_sha1 BT_EVENTS bt_send_peer_list bt_peer_started bt_peer_stopped bt_peer_progress refresh_summary);
+use BitTorrent::TrackerCore qw(bt_error Connect  parse_query_string %cgi QSTR ATTR_USE_RESULT CreateTables summary_sha1 BT_EVENTS bt_send_peer_list bt_peer_started bt_peer_stopped bt_peer_progress refresh_summary REFRESH_INTERVAL MAX_PEERS TORRENT_BASE_URL );
 use Data::Dumper;
 
 #use Devel::NYTProf::Apache;
@@ -49,59 +49,14 @@ use Data::Dumper;
 ## TrackerCGI.pm also runs as a CGI, but is slow
 ## Idea for a Perl CGI tracker from PHPBTTracker http://dehacked.2y.net:6969/
 
-##################
-## config below ##
-##################
-
-## TORRENT_BASE_URL, TORRENT_PATH, and the database connection
-## info MUST be changed. The rest may be left at their defaults.
-
-## Base URL to torrents (trailing directory '/' is not necessary)
-use constant TORRENT_BASE_URL	=> 'http://localhost/torrents';
-## URL of the tracker (with /announce suffix path_info)
-use constant TRACKER_URL	=> 'http://localhost/tracker/announce';
-
-## Filesystem path under which to find .torrent files (MUST end with '/')
-use constant TORRENT_PATH	=> '/var/www/torrents/';
-## Path to which to write torrent statistics HTML table
-use constant TORRENT_STATS_FILE	=> TORRENT_PATH.'/bt_stats.inc';
-## Path to which to write torrent RSS XML <item>s
-use constant TORRENT_RSS_FILE	=> TORRENT_PATH.'/bt_rss.inc';
-
-## Check if peers are reachable.  Set to 0 to disable.  Set to 1 to enable.
-use constant CHECK_PEER		=>    1;
-## Number of peers to send in one request
-use constant MAX_PEERS		=>   50;
-## Maximum reannounce interval (in seconds) (1800 == 30 mins)
-use constant REANNOUNCE_INTERVAL=> 1800;
-## Minimum reannounce interval (in seconds) ( 300 ==  5 mins)
-use constant REANNOUNCE_MIN	=>  300;
-## Maximum age last update can reach before expiring downloader (in seconds)
-use constant TIMEOUT_INTERVAL	=>    1.5*REANNOUNCE_INTERVAL;
-## Frequency for which to clear expired entries from database
-## (clear expired entries from database twice every reannounce period)
-use constant REFRESH_INTERVAL	=>    0.5*REANNOUNCE_INTERVAL;
-## HTML for image to use in for 'info' icon on stats page (e.g. '<img src=...>')
-use constant INFO_IMG		=> 'i';
-
-
-##################
-## config above ##
-##################
-
 ## 2003.08.08  v0.01  code()gluelogic.com  alpha 1
 ## 2004.11.08  v0.02  code()gluelogic.com
 ##   fixed code that generates RSS to properly generate <enclosure> tag
 ##     (thx David (labarks at comcast))
-$BitTorrent::TrackerCGI::VERSION || 1;          # (eliminate Perl warning)
-$BitTorrent::TrackerCGI::VERSION  = 0.02;
+## 2012.08.05 v0.03 hacked by James Michael DuPont<jamesmikedupont@gmail.com>
 
-## array ref for convenience and to ensure same settings used on all connect()s
-use constant BT_DB_INFO	=>[
-    'DBI:SQLite:database=/var/www/tracker/bittracker.sqlite',
-    "", "",
-    { PrintError=>1, RaiseError=>1, AutoCommit=>1 } 
-];
+$BitTorrent::TrackerCGI::VERSION || 1;          # (eliminate Perl warning)
+$BitTorrent::TrackerCGI::VERSION  = 0.03;
 
 
 BEGIN {

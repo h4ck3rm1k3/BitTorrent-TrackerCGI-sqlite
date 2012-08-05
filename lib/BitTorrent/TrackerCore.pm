@@ -21,7 +21,7 @@ our @EXPORT_OK = qw(bt_error Connect bt_scrape parse_query_string %cgi QSTR ATTR
 #use Bencode qw( bencode  ); #bdecode
 #use Convert::Bencode qw( bencode bdecode); #
 #use Convert::Bencode_XS qw(bencode bdecode);
-use Convert::Bencode_XS qw(bencode );
+use Convert::Bencode_XS qw(bencode ); # the bdecode from this package does not work!
 use Bencode qw( bdecode);
 
 use APR::Table ();
@@ -82,9 +82,9 @@ use constant TRACKER_URL	=> 'http://localhost/tracker/announce';
 ## Filesystem path under which to find .torrent files (MUST end with '/')
 use constant TORRENT_PATH	=> '/var/www/torrents/';
 ## Path to which to write torrent statistics HTML table
-use constant TORRENT_STATS_FILE	=> TORRENT_PATH.'/bt_stats.inc';
+use constant TORRENT_STATS_FILE	=> TORRENT_PATH.'bt_stats.inc';
 ## Path to which to write torrent RSS XML <item>s
-use constant TORRENT_RSS_FILE	=> TORRENT_PATH.'/bt_rss.inc';
+use constant TORRENT_RSS_FILE	=> TORRENT_PATH.'bt_rss.rss';
 
 ## Check if peers are reachable.  Set to 0 to disable.  Set to 1 to enable.
 use constant CHECK_PEER		=>    1;
@@ -615,8 +615,8 @@ sub bdecode_dict {
     else
     {
 #	warn "Check:" . unpack("H*",$arg);
-	warn "Check type:" . ref($arg);
-	warn "Check Len:" . length($arg);
+#	warn "Check type:" . ref($arg);
+#	warn "Check Len:" . length($arg);
 #	warn "Check Start:" . unpack("H*",substr($arg,0,10));
     }
 #    open OUT,">test.txt";
@@ -1037,7 +1037,7 @@ sub process_torrent_files {
 	return; ## (torrents that become unreadable will be deleted from db!)
     }
 
-    warn "metainfo:" .  Dumper(keys %{$metainfo});
+#    warn "metainfo:" .  Dumper(keys %{$metainfo});
 
     if (! $$metainfo{'announce'} eq TRACKER_URL )
     {
@@ -1161,13 +1161,15 @@ sub html_encode_in_place {
 sub print_stats {
     my($stats,$now) = @_;
     my($FH,$RSS) = (Symbol::gensym, Symbol::gensym);
-    open($FH,  '+<'.TORRENT_STATS_FILE) || return;
-    open($RSS, '+<'.TORRENT_RSS_FILE)   || return;
+    open($FH,  '+<'.TORRENT_STATS_FILE) || confess "cannot open file" . TORRENT_STATS_FILE;
+    open($RSS, '+<'.TORRENT_RSS_FILE)   || confess "cannot open rss file ". TORRENT_RSS_FILE;
     truncate($FH,0);
     truncate($RSS,0);
 
-    print $RSS "  <generator>BitTorrent::TrackerCGI (v",
-	       $BitTorrent::TrackerCGI::VERSION,")</generator>\n";
+    my $ns = "xmlns:bt=\"http://pine02.fosm.org/torrents/bt.xml\" ";
+
+    print $RSS "<?xml version=\"1.0\" encoding=\"UTF-8\" ?>\n<rss version=\"2.0\" $ns>\n<channel>\n";
+    print $RSS "  <generator>BitTorrent::TrackerCGI (v",  $BitTorrent::TrackerCGI::VERSION,")</generator>\n";
 
     print $FH <<"TORRENT_STATS";
 <style>
@@ -1200,15 +1202,6 @@ TORRENT_STATS
 	$c = $$stats{$_};
 	$path = $$c{'torrent_path'};
 
-	warn "path:$path";
-#	warn Dumper( keys %{$c});
-#$VAR7 = 'pieces';
-
-	warn "SHA1:". unpack('H*', $c->{'sha1'});;
-	foreach my $n ( 'name', 'size', 'mark','length','piece length', 'torrent_path', 'avg_rate','avg_progress')
-	{
-	    warn "Field : $n:".$c->{$n};
-	}
 
 
 	($nfo = $path) =~ s/\.torrent$//;
@@ -1283,11 +1276,24 @@ TORRENT_STATS
 	$$c{'mark'} < $most_recent || ($most_recent = $$c{'mark'});
 	$time = RFC_2822_date($$c{'mark'});
 
+	## enhance the rss feed 
+	my $sha1hex=unpack('H*', $c->{'sha1'});
+	my $random = "";
+	foreach my $n ( 'name', 'size', 'mark','length','piece length', 'torrent_path', 'avg_rate','avg_progress')
+	{
+	    my $name = $n;
+	    $name =~ s/ /_/g;
+
+	    $random .="<bt:$name>".$c->{$n} . "</bt:$name>\n";
+	}
+
 	print $RSS <<"        TORRENT_RSS";
 
   <item>
     <title>$$c{'name'}</title>
     <pubDate>$time</pubDate>
+    <bt:sha1>$sha1hex</bt:sha1>
+    $random
     <enclosure
       url="@{[(TORRENT_BASE_URL)]}/$path"
       type="application/x-bittorrent"
@@ -1305,6 +1311,8 @@ TORRENT_STATS
 
     print $RSS "\n  <lastBuildDate>",RFC_2822_date($most_recent),
 	       '</lastBuildDate>' if ($most_recent);
+
+    print $RSS "</channel>\n</rss>";
 
     close $RSS;
 }

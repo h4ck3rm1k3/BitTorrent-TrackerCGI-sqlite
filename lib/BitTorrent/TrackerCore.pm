@@ -172,13 +172,13 @@ sub summary_sha1 {
     if (DBI->err) {	warn  "Database error:". DBI->err;    }
     my $summary_sha1 =      $dbh->prepare_cached(QSTR->{'summary_sha1'}, ATTR_USE_RESULT);
     if ($summary_sha1->err) {	warn  "Database error:". $summary_sha1->err;    }
-    warn "Going to look for SHA:" .	$summary_sha1 .  " info hash:".  unpack("H*",$info_hash) ."in the database\n";
+    warn "Going to look for SHA:" .	$summary_sha1 .  " info hash:'".  unpack("H*",$info_hash) ."' in the database\n";
     my $torrent =      $dbh->selectrow_hashref($summary_sha1, undef, $info_hash);
     
     if ($torrent) {
 	return $torrent;
     } else {
-	if (!DBI->err)    {
+	if (DBI->err)    {
 	    warn "Database error " . DBI->err;
 	    return undef;
 	} else {
@@ -619,9 +619,9 @@ sub bdecode_dict {
 	warn "Check Len:" . length($arg);
 #	warn "Check Start:" . unpack("H*",substr($arg,0,10));
     }
-    open OUT,">test.txt";
-    print OUT $arg;
-    close OUT;
+#    open OUT,">test.txt";
+#    print OUT $arg;
+#    close OUT;
     my $t2= bdecode($arg);
 
 #    warn Dumper($t2);

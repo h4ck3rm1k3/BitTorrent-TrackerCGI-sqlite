@@ -208,10 +208,10 @@ sub bt_error {
 ## map of event keys to coderefs (subroutines)
 use constant BT_EVENTS =>
   {
-    'started'	=> \&BitTorrent::TrackerCore::bt_peer_started,
-    'stopped'	=> \&BitTorrent::TrackerCore::bt_peer_stopped,
-    'completed'	=> \&BitTorrent::TrackerCore::bt_peer_progress,
-    ''		=> \&BitTorrent::TrackerCore::bt_peer_progress
+    'started'	=> \&bt_peer_started,
+    'stopped'	=> \&bt_peer_stopped,
+    'completed'	=> \&bt_peer_progress,
+    ''		=> \&bt_peer_progress
   };
 
 
@@ -400,6 +400,9 @@ sub bt_peer_progress {
 sub bt_peer_stopped {
     ## get peer info
     my $peer =  shift || confess "missing peer";;
+
+    warn "Got a stopped peer, what peers do we have?" . Dumper($peer);
+
     scalar keys(%$peer)
       || ($cgi{'left'} == 0 ? return 1 : return bt_error('unknown peer_id'));
 	 ## (if none left to download, assume scc that finished previously)
@@ -1030,6 +1033,11 @@ sub process_torrent_files {
 	return;
     }
 
+    if ($name =~ /\.rss$/)
+    {
+	return;
+    }
+
     my $metainfo = read_torrent_file($name);
     
     if (!$metainfo) {
@@ -1649,3 +1657,5 @@ http://www.perturb.org/display/entry/629/
 http://www.sqlite.org/lang_insert.html
 http://www.perlmonks.org/?node_id=817899
 http://www.sqlite.org/datatype3.html
+http://wiki.theory.org/BitTorrentSpecification
+http://wiki.theory.org/BitTorrent_Tracker_Protocol

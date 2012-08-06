@@ -1,18 +1,5 @@
-#Alias /tracker /pine02/www/tracker/BitTorrent-TrackerCGI-sqlite/bin/
-AddHandler perl-script .cgi .pl
-PerlRequire /pine02/www/tracker/BitTorrent-TrackerCGI-sqlite/bin/simple.pl
-#PerlRequire /pine02/www/tracker/BitTorrent-TrackerCGI-sqlite/bin/startup.pl
-SetHandler perl-script
-#PerlHandler Bitracker
-PerlHandler  BitTorrent::Tracker
-AddType application/x-bittorrent .torrent
-AddType text/html .shtml
-AddType text/xml .xml
-AddHandler server-parsed .shtml .xml
+Options -ExecCGI -MultiViews +SymLinksIfOwnerMatch	
+Order deny, allow
+Deny from all
 
-
-Options +ExecCGI -MultiViews +SymLinksIfOwnerMatch	
-Order allow,deny
-Allow from all
-PerlSendHeader On
 

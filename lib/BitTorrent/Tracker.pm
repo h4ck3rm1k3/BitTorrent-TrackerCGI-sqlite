@@ -355,9 +355,8 @@ if (!MOD_PERL && !@ARGV) {
 }
 elsif (!MOD_PERL && $ARGV[0] eq 'force-refresh') {
     print "Content-type: text/plain; charset=ISO-8859-1\n\n"
-      if (exists $::ENV{'GATEWAY_INTERFACE'});
-    $dbh = DBI->connect(@{(BT_DB_INFO)})
-      || die('Database error: '.DBI->errstr."\n");
+	if (exists $::ENV{'GATEWAY_INTERFACE'});
+
     refresh_summary($^T);
     print "\ndone\n\n";
 }

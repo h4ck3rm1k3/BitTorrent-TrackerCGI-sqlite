@@ -803,11 +803,11 @@ sub refresh_summary {
 #   $dbh->selectrow_array("SELECT GET_LOCK('bt_tracker', 0)")      || return;
     Connect();
     my $mark = $dbh->selectrow_array("SELECT mark FROM bt_mark WHERE rowid=0")
-      || 0;
+	|| 1;
     if (!$mark)
     {
 	warn "No Mark";
-	$mark=0;
+	$mark=1;
     }
     die unless $now;
     
@@ -898,7 +898,9 @@ sub refresh_summary {
 	## transfer_over_period/(#downloaders_over_period * period_length)
 	$t = ($$v{'done'} - $$v{'odone'} + ($$d{'counts'} || 0)
 	      + $$v{'peer'} + $$v{'seed'} + $$v{'scc'}) || 1; # no divide by 0
-	$$v{'avg_rate'} = ($$v{'trans'} - $$v{'otrans'}) / ($t*($now - $mark));
+
+	$$v{'avg_rate'} = ($$v{'trans'} - $$v{'otrans'}) / (($t*($now - $mark))+1);
+
 	## 1 - (remaining size for curr downloaders)/(#downloaders * total_size)
 	$t = ($$v{'pend'} || 0) / ((($$v{'peer'}+$$v{'scc'})||1) * $$v{'size'});
 	$$v{'avg_progress'} = $t ? 1 - $t : 0; ## 0% rather than 100% if $t == 0

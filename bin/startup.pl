@@ -1,4 +1,6 @@
 #!/usr/bin/perl 
+use lib "/home/h4ck3rm1k3/perl5/lib/perl5";
+use lib "/home/h4ck3rm1k3/perl5/share/perl5";
 use lib "/pine02/www/tracker/BitTorrent-TrackerCGI-sqlite/lib";
 #use BitTorrent::TrackerCGI;
 #print "Hello";
@@ -80,15 +82,15 @@ use Apache::DBI ();  ## (MUST be before DBI.pm)
 use DBI ();
 DBI->install_driver('SQLite');
 use DBD::SQLite();
-Apache::DBI->connect_on_init
-  (
-    'DBI:SQLite:database=/var/www/tracker/bittracker.sqlite',"","",
-    {
-	PrintError => 1,	# warn() on errors
-	RaiseError => 1,	# do not die on error
-	AutoCommit => 1		# commit executes immediately
-    }
-  );
+# Apache::DBI->connect_on_init
+#   (
+#     'DBI:SQLite:database=/var/www/tracker/bittracker.sqlite',"","",
+#     {
+# 	PrintError => 1,	# warn() on errors
+# 	RaiseError => 1,	# do not die on error
+# 	AutoCommit => 1		# commit executes immediately
+#     }
+#   );
 
 ## ----------
 ## ----------

@@ -15,7 +15,7 @@ use Carp qw(cluck confess);
 
 require Exporter;
 our @ISA = qw(Exporter);
-our @EXPORT_OK = qw(bt_error Connect bt_scrape parse_query_string %cgi QSTR ATTR_USE_RESULT CreateTables summary_sha1 BT_EVENTS bt_send_peer_list bt_peer_started bt_peer_stopped bt_peer_progress refresh_summary REFRESH_INTERVAL MAX_PEERS TORRENT_BASE_URL);
+our @EXPORT_OK = qw(bencode_dict Connect bt_scrape parse_query_string %cgi QSTR ATTR_USE_RESULT CreateTables summary_sha1 BT_EVENTS bt_send_peer_list bt_peer_started bt_peer_stopped bt_peer_progress refresh_summary REFRESH_INTERVAL MAX_PEERS TORRENT_BASE_URL);
 
 
 #use Bencode qw( bencode  ); #bdecode
@@ -67,24 +67,32 @@ our $debug=1;
 ## Idea for a Perl CGI tracker from PHPBTTracker http://dehacked.2y.net:6969/
 
 ##################
-## config below ##
-##################
-
-
-## TORRENT_BASE_URL, TORRENT_PATH, and the database connection
-## info MUST be changed. The rest may be left at their defaults.
+## config routines, will be forwarded to the config file
 
 ## Base URL to torrents (trailing directory '/' is not necessary)
-use constant TORRENT_BASE_URL	=> 'http://localhost/torrents';
+sub TORRENT_BASE_URL {
+     'http://localhost/torrents';
+}
 ## URL of the tracker (with /announce suffix path_info)
-use constant TRACKER_URL	=> 'http://localhost/tracker/announce';
+sub TRACKER_URL	{
+    'http://localhost/tracker/announce'
+};
 
 ## Filesystem path under which to find .torrent files (MUST end with '/')
-use constant TORRENT_PATH	=> '/pine02/www/torrents/';
+sub TORRENT_PATH {
+    return '/var/www/torrents/'
+}
+
+
 ## Path to which to write torrent statistics HTML table
-use constant TORRENT_STATS_FILE	=> TORRENT_PATH.'bt_stats.inc';
+sub TORRENT_STATS_FILE {
+    TORRENT_PATH.'bt_stats.inc';
+}
+
 ## Path to which to write torrent RSS XML <item>s
-use constant TORRENT_RSS_FILE	=> TORRENT_PATH.'bt_rss.rss';
+sub TORRENT_RSS_FILE {
+    TORRENT_PATH.'bt_rss.rss';
+}
 
 ## Check if peers are reachable.  Set to 0 to disable.  Set to 1 to enable.
 use constant CHECK_PEER		=>    1;
@@ -117,8 +125,12 @@ $BitTorrent::TrackerCore::VERSION || 1;          # (eliminate Perl warning)
 $BitTorrent::TrackerCore::VERSION  = 0.03;
 
 ## array ref for convenience and to ensure same settings used on all connect()s
+sub DBPATH {
+    '/var/www/tracker/bittracker.sqlite';
+}
+
 use constant BT_DB_INFO	=>[
-    'DBI:SQLite:database=/pine02/var/bittracker.sqlite',
+    'DBI:SQLite:database=' . DBPATH,
     "", "",
     { PrintError=>1, RaiseError=>1, AutoCommit=>1 } 
 ];
@@ -160,6 +172,12 @@ use constant QSTR =>
 'pgroup_only_peers'	=>  "SELECT ip AS ip, port,substr(peer_id || '                    ', 1, 20) AS 'peer id' FROM bt_info WHERE sha1=? AND status = 'peer' LIMIT ?,?"
   };
 
+sub bt_error 
+{
+    my $error=shift;
+    confess $error;
+}
+
 ## encoding and decoding binary data to/from a string of hexadecimal pairs
 #sub bin2hex { unpack('H*',$_[0]) }   ##  bin2hex($binary_string)
 #sub hex2bin {   pack('H*',$_[0]) }   ##  hex2bin($hex_string)
@@ -194,14 +212,6 @@ sub setcgi
 {
 #    warn Dumper(@_);
     %cgi = @_;
-}
-
-## send error message via BitTorrent protocol
-##  bt_error($message)
-sub bt_error {
-    my $reason =shift||die "no param";
-    print STDOUT ${bencode_dict({ 'failure reason' => $reason })};
-    return 0; ## Apache::OK, and boolean false
 }
 
 
@@ -615,47 +625,8 @@ sub bdecode_dict {
     {
 	confess "Null arge to bedncode";
     }
-    else
-    {
-#	warn "Check:" . unpack("H*",$arg);
-#	warn "Check type:" . ref($arg);
-#	warn "Check Len:" . length($arg);
-#	warn "Check Start:" . unpack("H*",substr($arg,0,10));
-    }
-#    open OUT,">test.txt";
-#    print OUT $arg;
-#    close OUT;
+
     my $t2= bdecode($arg);
-
-#    warn Dumper($t2);
-
-# $VAR1 = {
-#           'info' => {
-#                       'length' => '20598911446',
-#                       'piece length' => '262144',
-#                       'pieces' => '',
-#                       'name' => 'earth-20120401130001.osm.bz2'
-#                     },
-#           'announce-list' => [
-#                                [
-#                                  'http://tracker.ccc.de/announce'
-#                                ],
-#                                [
-#                                  'http://tracker.openbittorrent.com/announce'
-#                                ],
-#                                [
-#                                  'http://tracker.publicbt.com/announce'
-#                                ],
-#                                [
-#                                  'http://tracker.istole.it/announce'
-#                                ]
-#                              ],
-#           'announce' => 'http://tracker.ccc.de/announce',
-#           'creation date' => '1342878133',
-#           'created by' => 'mktorrent 1.0'
-#         };
-
-
     return $t2;
 }
 
@@ -1363,28 +1334,6 @@ sub RFC_2822_date {
 		$year+1900, $hour, $min, $sec, $tz_prefix, $tz_hour, $tz_min;
 }
 
-## Under mod_perl, %cgi = $r->args was corrupting keys if they contained %00.
-## This routine does not have such a problem.  For non-mod_perl, these 13 lines
-## of code avoid the need to pull in bloated CGI.pm.  K.I.S.S.: intentionally
-## do not handle multi-values; later keys with same name overwrite earlier.
-sub parse_query_string {
-    my $input = shift||'';
-    my $cgi = \%cgi;#shift || {};
-    my($k,$v);
-#    my $cgi   = $_[1] || {};		# get user-provided %$cgi (if passed)
-#    defined($query)?$query:'';# copy query string because we modify it
-    $input =~ s/%(?![\dA-F]{2})//gi;	# remove improperly encoded percents (%)
-    $input =~ tr/+/ /;			# decode '+' into spaces in query string
-    foreach (split '&',$input) {	# resolve and unencode vars into %$cgi
-	($k,$v) = split '=',$_,2;
-	$k =~ s/%([\dA-F]{2})/chr(hex $1)/egi;
-	$v =~ s/%([\dA-F]{2})/chr(hex $1)/egi;
-	$$cgi{$k} = $v;
-    }
-#    warn "Got cgi:". Dumper(\%cgi);
-    return $cgi;
-}
-
 
 ## Run as CGI.  If no args passed, CGI mode, else if 'refresh' set up db tables.
 ##
@@ -1480,39 +1429,6 @@ CREATE TABLE IF NOT EXISTS bt_names
     ) 
     }) || die('Database error: '.$dbh->errstr."\n");
 
-}
-
-## MAX_ROWS is used in database table creation
-## (must 'alter table' after tables created; changing this will have no effect)
-## Note: MAX_ROWS is only advisory to MySQL to help it choose pointers sizes
-sub Main 
-{
-    if ($ARGV[0] eq 'force-refresh') {
-    print "Content-type: text/plain; charset=ISO-8859-1\n\n"	if (exists $::ENV{'GATEWAY_INTERFACE'});
-
-    Connect();
-
-    refresh_summary($^T);
-    print "\ndone\n\n";
-}
-elsif ($ARGV[0] eq 'refresh') {
-    print "Content-type: text/plain; charset=ISO-8859-1\n\n"
-      if (exists $::ENV{'GATEWAY_INTERFACE'});
-
-	exit(1);
-    }
-
-    ## database (BT_DB_NAME) must already have been created in advance, just
-    ## like db user (BT_DB_USER) and db password (BT_DB_PASS)
-    ## (If you change the size of bt_names.name VARCHAR(92), you must change
-    ##  the places in the file that hard-code this length; just search for "92")
-
-    CreateTables;
-
-    ## set up torrents in torrents directory
-    refresh_summary($^T);
-
-    print "\ndone\n\n" unless (exists $::ENV{'CRON'});
 }
 
 

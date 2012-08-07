@@ -4,20 +4,14 @@ package BitTorrent::Tracker;
 use strict;
 use warnings;
 use APR::Table ();
-use Apache2::Const -compile => qw(OK DECLINED M_GET M_POST M_OPTIONS HTTP_METHOD_NOT_ALLOWED);
-use Apache2::RequestIO ();
-use Apache2::RequestRec;
-use Bundle::Apache2 ();
 use Carp qw(confess cluck);
 use DBD::SQLite();
 use DBI;
 use Digest::SHA1 ();
 use File::Find ();
-use BitTorrent::TrackerCore qw(bt_error Connect  parse_query_string %cgi QSTR ATTR_USE_RESULT CreateTables summary_sha1 BT_EVENTS bt_send_peer_list bt_peer_started bt_peer_stopped bt_peer_progress refresh_summary REFRESH_INTERVAL MAX_PEERS TORRENT_BASE_URL );
+use BitTorrent::TrackerCore qw( bencode_dict Connect  parse_query_string %cgi QSTR ATTR_USE_RESULT CreateTables summary_sha1 BT_EVENTS bt_send_peer_list bt_peer_started bt_peer_stopped bt_peer_progress refresh_summary REFRESH_INTERVAL MAX_PEERS TORRENT_BASE_URL );
 use Data::Dumper;
 
-#use Devel::NYTProf::Apache;
-#use Devel::NYTProf;
 
 ## BitTorrent::TrackerCGI
 ##
@@ -69,19 +63,26 @@ BEGIN {
 }
 
 
+## send error message via BitTorrent protocol
+##  bt_error($message)
+sub bt_error {
+    my $res =shift;
+    my $reason =shift||die "no param";
+    print STDOUT ${bencode_dict({ 'failure reason' => $reason })};
+    return $res; ## Apache::OK, and boolean false
+}
+
 ## send HTTP 400 Bad Request and error message
 ##  bad_request($r, $message)
 sub bad_request {
-    my $r = shift|| confess "no request";
+    my $res = shift|| confess "no request";
     my $status = shift|| confess "no status";
     my $string = shift|| confess "no string";
-    cluck "Bad Request";
-    $r->status($status);
-    MOD_PERL > 1
-      ? $r->content_type('text/plain; charset=ISO-8859-1')
-      : $r->send_http_header('text/plain; charset=ISO-8859-1');
-    print STDOUT $string,"\nThis resource is for use by BitTorrent clients.\n";
-    return 0; ## Apache::OK
+    $res->status($status);  ## 302 Found (generic Temporary Redirect)
+    $res->headers->header('Location' , TORRENT_BASE_URL.'/');
+    $res->headers->header('content_type' , 'text/plain; charset=ISO-8859-1');
+    $res->body($string . "\nThis resource is for use by BitTorrent clients.\n");    
+    return $res; ## Apache::OK
 }
 
 ## send standard headers once ready to speak BitTorrent protocol
@@ -90,14 +91,13 @@ sub bad_request {
 ## are used in the BitTorrent protocol.  Just serve each peer as quickly as
 ## possible when it makes a single request every REANNOUNCE_INTERVAL
 sub send_bt_http_headers {
-    my $r = $_[0];
-    $r->status(200);
-    $r->no_cache(1);
-    $r->headers_out->{'Connection'} = 'close';
-    MOD_PERL > 1
-      ? $r->content_type('application/octet-stream; charset=ISO-8859-1')
-      : $r->send_http_header('application/octet-stream; charset=ISO-8859-1');
-    binmode(STDOUT,':raw') unless (MOD_PERL);
+    my $res = shift;
+#    cluck "send_bt_http_headers:". $res;
+    $res->status(200);
+    $res->headers->header('Cache-Control','no-cache'); #    $res->no_cache(1);
+    $res->headers->header('Connection','close');
+    $res->headers->header('content_type' , 'text/plain; charset=ISO-8859-1');
+#    binmode(STDOUT,':raw') unless (MOD_PERL);
 }
 
 
@@ -124,7 +124,7 @@ sub check_last_update {
     ## is recommended that a cron job augment or even replace refresh_summary().
     ## (cron job could check summary table and walk tables for expired peers,
     ##  simply by executing 'perl -T TrackerCGI.pm refresh)
-    my $now = $r->request_time;
+    my $now = $^T;
     if ($BitTorrent::TrackerCGI::mark < $now - REFRESH_INTERVAL) {
 	$r->rflush();
 #	close(STDOUT);  ## no keepalive requests; finish connection quickly 
@@ -133,65 +133,62 @@ sub check_last_update {
     }
 }
 
-## BitTorrent tracker mod_perl handler (main())
+use Plack::Request;
+use Carp qw(cluck);
+
 sub handler {
-    ## localize some globals instead of passing them between all routines (lazy)
-#    local($dbh,%cgi);
-    my $r = $_[0];
-
-    ## only accept HTTP request method "GET" (and M_HEAD == M_GET in Apache)
-    if (MOD_PERL) {
-	unless ($r->method_number == Apache2::Const::M_GET) {
-	    $r->allowed($r->allowed
-			| (1 << Apache2::Const::M_GET)
-			| (1 << Apache2::Const::M_OPTIONS));
-	    return Apache2::Const::HTTP_METHOD_NOT_ALLOWED;
-	}
-	## fixup $r->path_info if path translation was skipped
-	## (PerlTransHandler Apache::OK)
-	## NOTE: this expects the URI to begin with '/tracker'
-	$r->uri =~ m|^/tracker(.*)|
-	  && $r->path_info($1);
+    my $r = shift|| die "no env";
+    my $method = $r->method || "NONE";
+    my $res = HTTP::Engine::Response->new;   
+    unless ($r->method eq "GET") {
+	$res->status(405);
+	return $res;
     }
-    elsif (uc($::ENV{'REQUEST_METHOD'}) ne 'GET') 
+
+    #'PATH_INFO' => '/favicon.ico',
+    if ($r->uri =~ m|^/favicon\.ico|) 
     {
-	my $status_line = uc($::ENV{'REQUEST_METHOD'}) eq 'OPTIONS'
-	    ? '200 OK'
-	    : '405 Method Not Allowed';
-	print "Status: $status_line\n",
-	"Allow: GET, HEAD, OPTIONS\n",
-	"Content-type: text/plain; charset=ISO-8859-1\n\n",
-	"$status_line\n";
-	return;
+	$res->status(404);
+	return $res;
     }
-    
+
     my $dbh = BitTorrent::TrackerCore::Connect();
+    my $params = $r->parameters();
+    for my $k (keys %{$params}) {
 
-    parse_query_string(MOD_PERL ? scalar $r->args : $::ENV{'QUERY_STRING'},
-		       \%BitTorrent::TrackerCode::cgi);
-
-    ## check for path_info type request
-#    warn "check " . $r->path_info;
-
-    if ($r->path_info) {
-	if ($r->path_info ne '/announce') {
-	    if ($r->path_info eq '/scrape') {
-		send_bt_http_headers($r);
-		bt_scrape($r);
-		return 0; ## Apache::OK
-	    }
-	    else {
-		return bad_request($r, 400, 'Invalid path info in request.');
-	    }
+	if ($k eq "info_hash") {
+	    warn "Param $k:". unpack("H*",$params->{$k}) . "\n";
+	} else {
+	    warn "Param $k:". $params->{$k} . "\n";
 	}
-    }
-    else {
-	$r->status(302);  ## 302 Found (generic Temporary Redirect)
-	$r->headers_out->{'Location'} = TORRENT_BASE_URL.'/';
-	MOD_PERL > 1
-	  ? $r->content_type('text/plain; charset=ISO-8859-1')
-	  : $r->send_http_header('text/plain; charset=ISO-8859-1');
-	return 0; ## Apache::OK
+	$cgi{$k}= $params->{$k};
+    } 
+    my $path_info = $r->path_info;
+
+    #shorten it
+#    $path_info =~ s|/tracker/BitTorrent-TrackerCGI-sqlite/tracker/announce|/announce|;
+#    $path_info =~ s|/tracker/BitTorrent-TrackerCGI-sqlite/tracker/scrape/|/scrape/|;
+
+    warn "New Path Info" . $path_info . "\n";
+
+    if ($path_info ne '/announce') {	    
+
+	if ($path_info eq '/scrape') {
+	    send_bt_http_headers($res);
+	    bt_scrape($r);
+	    return $res; ## Apache::OK
+	}
+	elsif ($path_info eq '/forcerefresh') {
+	    Connect();
+	    refresh_summary($^T);
+	    return $res; ## Apache::OK
+	}
+	elsif ($path_info eq '/install') {
+	    CreateTables;
+	}
+	else {
+	    return bad_request($res, 400, 'Invalid path info in request. Expecting announce or scrape, We got '. $path_info);
+	}
     }
 
     ## validate parameters for other actions
@@ -205,7 +202,7 @@ sub handler {
 	if (! (defined($cgi->{$f}))) {
 	    warn "Missing field:" . $f;
 	    cluck "Error:" . Dumper($cgi);
-	    return bad_request($r, 400, 'Missing ' . $f)  ;
+	    return bad_request($res, 400, 'Missing ' . $f)  ;
 	}
     }
 
@@ -213,15 +210,16 @@ sub handler {
     $cgi->{'numwant'} = MAX_PEERS
       if (!defined($cgi->{'numwant'}) || $cgi->{'numwant'} > MAX_PEERS);
 
-
+    # default field IP
     {
 	my $f = 'ip';
 	if (! (defined($cgi->{$f}))) {
-	    warn "Missing field:" . $f;
-	    ($cgi->{'ip'}) = ($cgi->{'ip'} || $r->connection->remote_ip) =~ /^(.+)$/;
+	    ($cgi->{'ip'}) = ($r->address) =~ /^(.+)$/;
+	    warn "Missing IP:" . $f . " using " . $cgi->{'ip'} . "\n";
 	}
     }
 
+    # default field left
     {
 	my $f = 'last';
 	if (! (defined($cgi->{$f}))) {
@@ -231,19 +229,19 @@ sub handler {
 	}
     }
     
-    return bad_request($r, 400, 'infohash wrong size.') unless  length($cgi->{'info_hash'}) == 20;
-    return bad_request($r, 400, 'peer_id wrong size.')  unless  length($cgi->{'peer_id'}) == 20;
-    return bad_request($r, 400, 'ip wrong size.')  unless  length($cgi->{'ip'}) < 128;
+    return bad_request($res, 400, 'infohash wrong size.') unless  length($cgi->{'info_hash'}) == 20;
+    return bad_request($res, 400, 'peer_id wrong size.')  unless  length($cgi->{'peer_id'}) == 20;
+    return bad_request($res, 400, 'ip wrong size.')  unless  length($cgi->{'ip'}) < 128;
 
 ##
     foreach my $f (qw(uploaded downloaded left last numwant) )     {
-	return bad_request($r, 400, 'Bad format ' . $f)  unless (
+	return bad_request($res, 400, 'Bad format ' . $f)  unless (
 	    $cgi->{$f}       !~ tr/0-9//c
 	    );
     }
     
     foreach my $f (qw(port) ) {
-	return bad_request($r, 400, 'Bad format ' . $f)  unless (
+	return bad_request($res, 400, 'Bad format ' . $f)  unless (
 	    $cgi->{$f}       =~ /^(\d+)/
 	    && $1 > 1023  
 	    && $1 < 65536 
@@ -255,10 +253,10 @@ sub handler {
 
     ## check requested action
     exists(BitTorrent::TrackerCore::BT_EVENTS->{$cgi->{'event'}})
-      || return bad_request($r, 400, "Invalid 'event' requested.");
+      || return bad_request($res, 400, "Invalid 'event' requested.");
 
     ## send HTTP headers, subsequent errors must be sent via BitTorrent protocol
-    send_bt_http_headers($r);
+    send_bt_http_headers($res);
 
     ## get torrent info (validate torrent exists in database)
     warn "Going to prepare db:" . QSTR->{'summary_sha1'} . "\n";
@@ -281,11 +279,11 @@ sub handler {
 
     my $torrent =summary_sha1($cgi->{'info_hash'}) || (
 	!DBI->err
-	? return bt_error('Requested torrent not available on this tracker.' 
+	? return bt_error($res,'Requested torrent not available on this tracker.' 
 			  . ",summary_sha1 :" . unpack("H*",$summary_sha1 )
 			  . ",info_hash:" . unpack("H*",$cgi->{'info_hash'})
 	)
-	: return bt_error('database error')
+	: return bt_error($res,'database error')
 	);
 
 
@@ -294,7 +292,7 @@ sub handler {
 					ATTR_USE_RESULT);
     my $peer =
       $dbh->selectrow_hashref($info_get, undef, $cgi->{'peer_id'})
-      || (!DBI->err ? +{} : return bt_error('database error'));
+      || (!DBI->err ? +{} : return bt_error($res,'database error'));
 
     BitTorrent::TrackerCore::BT_EVENTS->{$cgi->{'event'}}->($peer)
       && bt_send_peer_list($torrent);
@@ -302,8 +300,9 @@ sub handler {
     ## Run cleanup if refresh interval has elapsed.
     check_last_update($r);
 
-    ## Apache::OK
-    return 0;
+    $res->res(200);
+    return $res;
+    
 }
 
 ## Run as CGI.  If no args passed, CGI mode, else if 'refresh' set up db tables.
@@ -326,34 +325,8 @@ sub handler {
 sub Main 
 {
     my $dbh=Connect();
-if (!MOD_PERL && !@ARGV) {
-    ## create a pseudo request record to substitute for mod_perl $r
-    ## (only valid for the way request_rec is used within this program)
-    my $r = {};
-    {
-	package apache_connection_rec_hack;
-	sub remote_ip { $::ENV{'REMOTE_ADDR'} || '' }
 
-	package apache_request_rec_hack;
-	sub connection { bless({}, 'apache_connection_rec_hack') }
-	sub headers_out { print "$_[1]: $_[2]\n" }
-	sub no_cache { print 
-	  "Cache-Control: no-cache, max-age=0, must-revalidate\n",
-	  "Pragma: no-cache\n",
-	  "Expires: 0\n",
-	  "Vary: *\n" }
-	sub path_info { $::ENV{'PATH_INFO'} }
-	sub request_time { $^T }
-	sub rflush { select((select(STDOUT),$|=1)[0]) }
-	sub send_http_header { print "Content-type: $_[1]\n\n" }
-	sub status { print "Status: $_[1]\n" unless ($_[1] == 200) }
-	bless $r;
-    }
-
-    handler($r) unless $^C;
-
-}
-elsif (!MOD_PERL && $ARGV[0] eq 'force-refresh') {
+    if (!MOD_PERL && $ARGV[0] eq 'force-refresh') {
     print "Content-type: text/plain; charset=ISO-8859-1\n\n"
 	if (exists $::ENV{'GATEWAY_INTERFACE'});
 

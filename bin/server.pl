@@ -1,8 +1,10 @@
 #!/usr/bin/perl 
 #warn "start up script started\n";
-use lib "/home/h4ck3rm1k3/perl5/lib/perl5";
-use lib "/home/h4ck3rm1k3/perl5/share/perl5";
-use lib "/pine02/www/tracker/BitTorrent-TrackerCGI-sqlite/lib";
+#use lib "/home/h4ck3rm1k3/perl5/lib/perl5";
+#use lib "/home/h4ck3rm1k3/perl5/share/perl5";
+#use lib "/pine02/www/tracker/BitTorrent-TrackerCGI-sqlite/lib";
+use lib "/home/mdupont/experiments/fosm/tracker/BitTorrent-TrackerCGI-sqlite/lib";
+
 use strict;
 use DynaLoader ();
 use XSLoader ();
@@ -20,18 +22,15 @@ DBI->install_driver('SQLite');
 use DBD::SQLite();
 use BitTorrent::Tracker;
 use HTTP::Engine;
+use Plack::Loader;
 
-HTTP::Engine->new(
-
+my $engine = HTTP::Engine->new(
     interface => {
-	args => {
-	    host => "0.0.0.0",
-	    port => 8081,
-	},
-        module => "ServerSimple", 
+	module => 'PSGI',
 	request_handler => \&BitTorrent::Tracker::handler
     },
-    )->run;
+  );
+my $app = sub { $engine->run(@_) };
+Plack::Loader->load('Standalone', port => 8081)->run($app); # see L<Plack::Server::Standalone> and  L<Plack::Loader>
 
-#warn "start up script loaded\n";
 1;

@@ -15,7 +15,26 @@ use Carp qw(cluck confess);
 
 require Exporter;
 our @ISA = qw(Exporter);
-our @EXPORT_OK = qw(bencode_dict Connect bt_scrape parse_query_string %cgi QSTR ATTR_USE_RESULT CreateTables summary_sha1 BT_EVENTS bt_send_peer_list bt_peer_started bt_peer_stopped bt_peer_progress refresh_summary REFRESH_INTERVAL MAX_PEERS TORRENT_BASE_URL);
+our @EXPORT_OK = qw(
+bencode_dict 
+Connect 
+bt_scrape 
+parse_query_string 
+%cgi 
+QSTR ATTR_USE_RESULT 
+CreateTables 
+summary_sha1 
+BT_EVENTS 
+bt_send_peer_list 
+bt_peer_started 
+bt_peer_stopped 
+bt_peer_progress 
+refresh_summary 
+REFRESH_INTERVAL 
+MAX_PEERS 
+TORRENT_BASE_URL
+CheckPeer
+);
 
 
 #use Bencode qw( bencode  ); #bdecode
@@ -30,6 +49,8 @@ use Fcntl ();
 use Socket;
 use Symbol ();
 use Data::Dumper;
+use constant PROTOCOL_NAME     => 'BitTorrent protocol';
+use constant PROTOCOL_NAME_LEN => length(PROTOCOL_NAME);
 
 our $dbh;
 our @params;
@@ -161,7 +182,7 @@ use constant QSTR =>
 
 'info_get'		=>  "SELECT ip,status FROM bt_info WHERE peer_id=?",
 
-'info_add'		=>  "INSERT OR REPLACE INTO bt_info (ip,port,peer_id, sha1) values (?,?,?,?)", #INET_ATON(
+'info_add'		=>  "INSERT OR REPLACE INTO bt_info (ip,port,peer_id, sha1) values (?,?,?,?)", 
 
 'info_peer_to_seed'	=>  "UPDATE bt_info SET status='seed' WHERE peer_id=?",
 
@@ -175,7 +196,8 @@ use constant QSTR =>
 sub bt_error 
 {
     my $error=shift;
-    confess $error;
+    cluck $error;
+    $error; # return the error string
 }
 
 ## encoding and decoding binary data to/from a string of hexadecimal pairs
@@ -336,11 +358,168 @@ sub bt_send_peer_list {
 				  'peers' => $peers })};
 }
 
+use Socket qw( SOCK_RAW);
+use Carp qw(confess);
+use Socket::GetAddrInfo qw( getaddrinfo getnameinfo );
+use IO::Socket;
+use Data::Dumper;
+
+sub CheckPeer 
+{
+    my $ip=shift|| confess "no IP";
+    my $port=shift || confess "no port";
+    my $info_hash=shift || confess "no info hash";
+    my $peer_id=shift || confess "no peer id";
+
+    my %hints = ( socktype => SOCK_STREAM );
+    my ( $err, @res ) = getaddrinfo( $ip, $port, \%hints );
+    die "Cannot getaddrinfo - $err" if $err;
+    my $bitvec = '';    
+    my $sock;
+    my $SH;
+    #vec($bitvec,fileno $SH,1) = 1;
+    
+    foreach my $ai ( @res ) {
+	my $candidate = IO::Socket->new();
+#    warn Dumper($ai);
+	print "CHECK \n";
+	print "protocol" . $ai->{'protocol'} . "\n";
+	print "socktype" . $ai->{'socktype'} . "\n";
+	print "family" . $ai->{'family'} . "\n";
+	print "ADDR:" .  unpack("H*", $ai->{'addr'}) . "\n";
+	
+	if (!$candidate->socket( $ai->{family}, $ai->{socktype}, $ai->{protocol} )){
+	    warn "cannot socket";;
+	    next;
+	}
+	
+	my $connection = $candidate->connect( $ai->{addr});
+	warn "connection". Dumper($connection);
+	
+	if (! $connection)
+	{
+	    warn "Cannot connect to IP:$ip and port:$port";;
+	    next;
+	}
+	
+
+	my $socketopt = $connection->getsockopt(Socket::SOL_SOCKET,Socket::SO_ERROR);
+	warn Dumper($socketopt);
+	
+	## send
+	## entire sent string is short and should easily fit in socket send buffers
+	## (SO_SNDBUF) so, for simplicity, fail if this is not the case
+	##   protocol send
+	##    1 byte containing length of protocol name followed by protocol name
+	##    8 bytes reserved
+	##   20 bytes binary data $info_hash
+	warn "Before Send";
+	my $data= chr(PROTOCOL_NAME_LEN).PROTOCOL_NAME.
+	    "\0\0\0\0\0\0\0\0".$info_hash;
+
+	warn "Going to send:".   Dumper($data);
+	my $sendret= $connection->send( $data,
+					Socket::MSG_DONTWAIT|Socket::MSG_NOSIGNAL);
+	
+	warn "Send:" . Dumper($sendret);
+
+	if ($sendret==1+(PROTOCOL_NAME_LEN)+8+20)
+	{
+	    
+	}
+	else
+	{
+	    shutdown($SH,2); 
+	    warn "failed";
+	    next;
+	}
+	
+	## recv
+	## entire expected string is short and should easily fit in sender's socket
+	## send buffers and our socket recv buffers (SO_RCVBUF) so, for simplicity,
+	## fail if not received all at once, after waiting for data to be ready
+	##   protocol receive
+	##    1 byte containing length of protocol name followed by protocol name
+	##    8 bytes reserved (ignore its contents)
+	##   20 bytes binary data $info_hash
+	##   20 bytes binary data $peer_id
+	
+	warn "Before Recv";
+	my $recvdata= $connection->recv($data, 1+PROTOCOL_NAME_LEN+8+20+20, Socket::MSG_NOSIGNAL);
+	if (	defined($recvdata))
+	{
+	    warn "recv:" .  Dumper($recvdata);
+	}
+	else
+	{
+	    $connection->shutdown(2);
+	    warn "no response";
+	    next;
+	}
+	
+	warn "Before Shutdown";
+	$connection->shutdown(2);
+	$connection->close();
+	warn "Before return";
+	
+	## validate response
+	my $status = 0;
+	
+	if (   ord(substr($data,0,1)) == PROTOCOL_NAME_LEN)
+	{
+
+	    if (substr($data,1,PROTOCOL_NAME_LEN) eq PROTOCOL_NAME)
+	    {
+
+		if (substr($data,1+PROTOCOL_NAME_LEN+8,20) eq $info_hash)
+		{
+		    
+		    if (substr($data,1+PROTOCOL_NAME_LEN+8+20,20) eq $peer_id)
+		    {
+			warn "Found one!";
+			$sock = $candidate;
+			last;
+			
+		    }
+		    else
+		    {
+			warn "bad peer";
+		    }
+		}
+		else
+		{
+		    warn "bad info hash";
+		}
+	    }
+	    else
+	    {
+		warn "bad protocol name";
+	    }
+	}
+	else
+	{
+	    warn "bad protocol name length";
+	}      
+    }
+    if ($sock){
+	warn "Found $sock";
+    }
+    
+    return $sock;
+}
+
+
 sub bt_peer_started {
     my $peer = shift || confess "need peer";
     ## (DNS lookup (if DNS name, not IP) can take non-trivial amount of time)
-    my $iaddr = Socket::inet_aton($cgi{'ip'})
-      || return bt_error('invalid IP address or unresolvable DNS name sent');
+
+    my $connection =CheckPeer(@cgi{'ip','port','info_hash','peer_id'});
+
+    if (!$connection)    { 
+	return bt_error("Duplicated peer_id or changed IP address/name. ".
+			"Please restart BitTorrent.");
+    }
+    my $iaddr= $peer->{'addr'};
 
     !(scalar keys %$peer) || $$peer{'ip'} eq $iaddr
       ## tolerate duplicate 'started' peer_id if the IPs match, else error.
@@ -357,12 +536,8 @@ sub bt_peer_started {
 	  : 'scc';
 
     ## insert/update peer in database tables
-    $dbh->do(QSTR->{'info_add'}, {}, Socket::inet_aton(Socket::inet_ntoa($iaddr)),
-	     @cgi{'port','peer_id','info_hash'}, $status)
-      || return bt_error('database error');
-    $dbh->do(QSTR->{'data_add'}, {},
-	     @cgi{'left','uploaded','downloaded','peer_id'})
-      || return bt_error('database error');
+    $dbh->do(QSTR->{'info_add'}, {}, $iaddr, @cgi{'port','peer_id','info_hash'}, $status)    || return bt_error('database error');
+    $dbh->do(QSTR->{'data_add'}, {}, @cgi{'left','uploaded','downloaded','peer_id'})   || return bt_error('database error');
 
     ## update summary table if new entry (ignore errors)
     if (!scalar keys %$peer) {
@@ -657,7 +832,7 @@ use constant PROTOCOL_NAME_LEN => length(PROTOCOL_NAME);
 
 sub is_peer {
 
-## $iaddr must be packed address, i.e. inet_aton($ip)
+## $iaddr must be packed address, i.e. 
     my $iaddr=shift || confess "missing packed address";
     my $port =shift ||  confess "missing port"; 
 
@@ -678,6 +853,7 @@ sub is_peer {
       && ($flags = fcntl($SH, Fcntl::F_GETFL, 0))
       && fcntl($SH, Fcntl::F_SETFL, $flags | Fcntl::O_NONBLOCK)
       || return 1;
+
     select((select($SH),$|=1)[0]);
     vec($bitvec,fileno $SH,1) = 1;
 
@@ -689,11 +865,44 @@ sub is_peer {
 	. unpack("H*",$iaddr) . "\n" if $debug;
     my $x=Socket::sockaddr_in($port, $iaddr);
     warn "Got socket: " . unpack("H*",$x) if $debug;
-    connect($SH, $x)
-      || $! == Errno::EINPROGRESS
-      || return 0;
-    select(undef,my $w=$bitvec,undef,5) > 0
-      || ($! = Errno::ETIMEDOUT, return 0);
+
+    if (connect($SH, $x))
+    {
+
+    }
+    else
+    {
+	if ($! == Errno::EINPROGRESS)
+	{
+	    warn "In Progress $!";
+	  # see http://stackoverflow.com/questions/6202454/operation-now-in-progress-error-on-connect-function-error
+	}
+	else
+	{
+	    warn "Connect failed $!";
+	    return 0;
+	}
+    }
+
+
+    my $select = select(undef,my $w=$bitvec,undef,5);
+    if ($select > 0){
+	
+    }  else   {
+	if ($! == Errno::ETIMEDOUT)
+	{
+	    warn "Select failed $!";
+	    return 0;
+	}
+	else
+	{
+
+	}
+    }
+
+
+    warn "After Select";
+
     ($! = unpack('I',getsockopt($SH,Socket::SOL_SOCKET,Socket::SO_ERROR))) == 0
       || return 0;
 
@@ -704,10 +913,12 @@ sub is_peer {
     ##    1 byte containing length of protocol name followed by protocol name
     ##    8 bytes reserved
     ##   20 bytes binary data $info_hash
+    warn "Before Send";
     send($SH, chr(PROTOCOL_NAME_LEN).PROTOCOL_NAME.
 	      "\0\0\0\0\0\0\0\0".$cgi{'info_hash'},
 	 Socket::MSG_DONTWAIT|Socket::MSG_NOSIGNAL)==1+(PROTOCOL_NAME_LEN)+8+20
       || (shutdown($SH,2), return 0);
+
     ## recv
     ## entire expected string is short and should easily fit in sender's socket
     ## send buffers and our socket recv buffers (SO_RCVBUF) so, for simplicity,
@@ -717,12 +928,20 @@ sub is_peer {
     ##    8 bytes reserved (ignore its contents)
     ##   20 bytes binary data $info_hash
     ##   20 bytes binary data $peer_id
+    warn "Before Select";
     select(my $r=$bitvec,undef,undef,5) > 0
       || (shutdown($SH,2), $! = Errno::ETIMEDOUT, return 0);
+
+    warn "Before Recv";
+
     defined(recv($SH, $data, 1+PROTOCOL_NAME_LEN+8+20+20, Socket::MSG_NOSIGNAL))
       || (shutdown($SH,2), return 0);
+
+    warn "Before Shutdown";
     shutdown($SH,2);
     close($SH);
+
+    warn "Before return";
 
     ## validate response
     return  ord(substr($data,0,1)) == PROTOCOL_NAME_LEN
@@ -1577,3 +1796,6 @@ http://www.perlmonks.org/?node_id=817899
 http://www.sqlite.org/datatype3.html
 http://wiki.theory.org/BitTorrentSpecification
 http://wiki.theory.org/BitTorrent_Tracker_Protocol
+
+How to check the ipv6 peer?
+http://search.cpan.org/~pevans/Socket-GetAddrInfo-0.22/lib/Socket/GetAddrInfo.pm#Lookup_for_connect

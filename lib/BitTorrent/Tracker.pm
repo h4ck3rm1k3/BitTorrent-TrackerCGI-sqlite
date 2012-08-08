@@ -126,7 +126,7 @@ sub check_last_update {
     ##  simply by executing 'perl -T TrackerCGI.pm refresh)
     my $now = $^T;
     if ($BitTorrent::TrackerCGI::mark < $now - REFRESH_INTERVAL) {
-	$r->rflush();
+#	$r->rflush();
 #	close(STDOUT);  ## no keepalive requests; finish connection quickly 
 	# causes : Filehandle STDOUT reopened as GEN0 only for input
 	refresh_summary($now);
@@ -216,6 +216,9 @@ sub handler {
 	if (! (defined($cgi->{$f}))) {
 	    ($cgi->{'ip'}) = ($r->address) =~ /^(.+)$/;
 	    warn "Missing IP:" . $f . " using " . $cgi->{'ip'} . "\n";
+
+	    ($cgi->{'ip'}) = ($cgi->{'ipv6'}) =~ /^(.+)$/; # ipv6
+	    warn "Missing IP:" . $f . " using IPV6" . $cgi->{'ip'} . "\n";
 	}
     }
 
@@ -294,13 +297,22 @@ sub handler {
       $dbh->selectrow_hashref($info_get, undef, $cgi->{'peer_id'})
       || (!DBI->err ? +{} : return bt_error($res,'database error'));
 
-    BitTorrent::TrackerCore::BT_EVENTS->{$cgi->{'event'}}->($peer)
-      && bt_send_peer_list($torrent);
-
+    my $status = BitTorrent::TrackerCore::BT_EVENTS->{$cgi->{'event'}}->($peer); # this could cause an error
+    
+    if ($status eq "1")
+    {
+	warn "Status :$status";
+	bt_send_peer_list($torrent);
+    }
+    else
+    {
+	bt_error($res,$status);# error
+    }
     ## Run cleanup if refresh interval has elapsed.
     check_last_update($r);
 
-    $res->res(200);
+    $res->status(200);  ## 200 OK
+
     return $res;
     
 }

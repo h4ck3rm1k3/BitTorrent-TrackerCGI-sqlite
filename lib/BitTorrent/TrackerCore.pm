@@ -412,7 +412,7 @@ sub CheckPeer
 	##    1 byte containing length of protocol name followed by protocol name
 	##    8 bytes reserved
 	##   20 bytes binary data $info_hash
-	warn "Before Send";
+	warn "Before Send" if $debug >40;
 	my $data= chr(PROTOCOL_NAME_LEN).PROTOCOL_NAME.
 	    "\0\0\0\0\0\0\0\0".$info_hash;
 
@@ -443,7 +443,7 @@ sub CheckPeer
 	##   20 bytes binary data $info_hash
 	##   20 bytes binary data $peer_id
 	
-	warn "Before Recv";
+	warn "Before Recv" if $debug >40;
 	my $recvdata= $connection->recv($data, 1+PROTOCOL_NAME_LEN+8+20+20, Socket::MSG_NOSIGNAL);
 	if (	defined($recvdata))
 	{
@@ -456,10 +456,10 @@ sub CheckPeer
 	    next;
 	}
 	
-	warn "Before Shutdown";
+	warn "Before Shutdown" if $debug >40;
 	$connection->shutdown(2);
 	$connection->close();
-	warn "Before return";
+	warn "Before return" if $debug >40;
 	
 	## validate response
 	my $status = 0;
@@ -473,9 +473,10 @@ sub CheckPeer
 		if (substr($data,1+PROTOCOL_NAME_LEN+8,20) eq $info_hash)
 		{
 		    
-		    if (substr($data,1+PROTOCOL_NAME_LEN+8+20,20) eq $peer_id)
+		    my $newpeerid=substr($data,1+PROTOCOL_NAME_LEN+8+20,20) ;
+		    if ($newpeerid eq $peer_id)
 		    {
-			warn "Found one!";
+			warn "Found a valid peer !" . unpack("H*",$ai->{addr}) if $debug;
 #			$sock = $candidate;
 			$sock = $ai->{addr};
 			last;
@@ -483,7 +484,7 @@ sub CheckPeer
 		    }
 		    else
 		    {
-			warn "bad peer";
+			warn "bad peer got $newpeerid expected $peer_id\n";
 		    }
 		}
 		else
@@ -834,125 +835,6 @@ BEGIN {
 use constant PROTOCOL_NAME     => 'BitTorrent protocol';
 use constant PROTOCOL_NAME_LEN => length(PROTOCOL_NAME);
 
-sub is_peer {
-
-## $iaddr must be packed address, i.e. 
-    my $iaddr=shift || confess "missing packed address";
-    my $port =shift ||  confess "missing port"; 
-
-    CHECK_PEER || return 1; ## assume reachable if CHECK_PEER is disabled
-
-    my($flags,$rpackedaddr,$data);
-    my $SH = Symbol::gensym;
-    my $bitvec = '';
-
-    ## (The following code is taken from a general purpose library of mine
-    ##  and is special-purposed here.  The code here is not as error-tolerant
-    ##  and reports failure on some anomalies handled by the robust library.)
-
-    ## create socket and configure (return 'pass' on errors in this section)
-    ## set nonblocking mode (else connect() will block)
-    ## set unbuffered mode (disable stdio buffering of output), set bitvec
-    socket($SH, Socket::PF_INET, Socket::SOCK_STREAM, Socket::IPPROTO_TCP)
-      && ($flags = fcntl($SH, Fcntl::F_GETFL, 0))
-      && fcntl($SH, Fcntl::F_SETFL, $flags | Fcntl::O_NONBLOCK)
-      || return 1;
-
-    select((select($SH),$|=1)[0]);
-    vec($bitvec,fileno $SH,1) = 1;
-
-    ## connect to remote address and port
-    ## 'man 2 connect' for nonblocking methodology with EINPROGRESS
-    ## timeout after 5 seconds (modify time in select() below to change this)
-
-    warn "Going to try and connect to port :$port and iaddr:"
-	. unpack("H*",$iaddr) . "\n" if $debug;
-    my $x=Socket::sockaddr_in($port, $iaddr);
-    warn "Got socket: " . unpack("H*",$x) if $debug;
-
-    if (connect($SH, $x))
-    {
-
-    }
-    else
-    {
-	if ($! == Errno::EINPROGRESS)
-	{
-	    warn "In Progress $!";
-	  # see http://stackoverflow.com/questions/6202454/operation-now-in-progress-error-on-connect-function-error
-	}
-	else
-	{
-	    warn "Connect failed $!";
-	    return 0;
-	}
-    }
-
-
-    my $select = select(undef,my $w=$bitvec,undef,5);
-    if ($select > 0){
-	
-    }  else   {
-	if ($! == Errno::ETIMEDOUT)
-	{
-	    warn "Select failed $!";
-	    return 0;
-	}
-	else
-	{
-
-	}
-    }
-
-
-    warn "After Select";
-
-    ($! = unpack('I',getsockopt($SH,Socket::SOL_SOCKET,Socket::SO_ERROR))) == 0
-      || return 0;
-
-    ## send
-    ## entire sent string is short and should easily fit in socket send buffers
-    ## (SO_SNDBUF) so, for simplicity, fail if this is not the case
-    ##   protocol send
-    ##    1 byte containing length of protocol name followed by protocol name
-    ##    8 bytes reserved
-    ##   20 bytes binary data $info_hash
-    warn "Before Send";
-    send($SH, chr(PROTOCOL_NAME_LEN).PROTOCOL_NAME.
-	      "\0\0\0\0\0\0\0\0".$cgi{'info_hash'},
-	 Socket::MSG_DONTWAIT|Socket::MSG_NOSIGNAL)==1+(PROTOCOL_NAME_LEN)+8+20
-      || (shutdown($SH,2), return 0);
-
-    ## recv
-    ## entire expected string is short and should easily fit in sender's socket
-    ## send buffers and our socket recv buffers (SO_RCVBUF) so, for simplicity,
-    ## fail if not received all at once, after waiting for data to be ready
-    ##   protocol receive
-    ##    1 byte containing length of protocol name followed by protocol name
-    ##    8 bytes reserved (ignore its contents)
-    ##   20 bytes binary data $info_hash
-    ##   20 bytes binary data $peer_id
-    warn "Before Select";
-    select(my $r=$bitvec,undef,undef,5) > 0
-      || (shutdown($SH,2), $! = Errno::ETIMEDOUT, return 0);
-
-    warn "Before Recv";
-
-    defined(recv($SH, $data, 1+PROTOCOL_NAME_LEN+8+20+20, Socket::MSG_NOSIGNAL))
-      || (shutdown($SH,2), return 0);
-
-    warn "Before Shutdown";
-    shutdown($SH,2);
-    close($SH);
-
-    warn "Before return";
-
-    ## validate response
-    return  ord(substr($data,0,1)) == PROTOCOL_NAME_LEN
-	    && substr($data,1,PROTOCOL_NAME_LEN) eq PROTOCOL_NAME
-	    && substr($data,1+PROTOCOL_NAME_LEN+8,20) eq $cgi{'info_hash'}
-	    && substr($data,1+PROTOCOL_NAME_LEN+8+20,20) eq $cgi{'peer_id'};
-}
 
 ## Clean timed out entries from the peer/scc hash tables
 ## (takes optional _quoted_ hash as second param for extensible use by scrape)

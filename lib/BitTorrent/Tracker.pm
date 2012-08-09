@@ -211,17 +211,16 @@ sub handler {
       if (!defined($cgi->{'numwant'}) || $cgi->{'numwant'} > MAX_PEERS);
 
     # default field IP
-    {
-	my $f = 'ip';
-	if (! (defined($cgi->{$f}))) {
-	    ($cgi->{'ip'}) = ($r->address) =~ /^(.+)$/;
-	    warn "Missing IP:" . $f . " using " . $cgi->{'ip'} . "\n";
-
+    if (! (defined($cgi->{'ip'}))) {
+	if (defined($cgi->{'ipv6'})) {
 	    ($cgi->{'ip'}) = ($cgi->{'ipv6'}) =~ /^(.+)$/; # ipv6
-	    warn "Missing IP:" . $f . " using IPV6" . $cgi->{'ip'} . "\n";
+	    warn "Missing IP: using IPV6" . $cgi->{'ip'} . "\n";
+	}   else  {
+	    ($cgi->{'ip'}) = ($r->address) =~ /^(.+)$/;
+	    warn "Missing IP: using " . $cgi->{'ip'} . "\n";
 	}
     }
-
+   
     # default field left
     {
 	my $f = 'last';

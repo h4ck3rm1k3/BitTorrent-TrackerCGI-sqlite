@@ -505,7 +505,8 @@ sub CheckPeer
 	warn "Found $sock";
     }
     
-    return $sock;
+#    return $sock;
+    return $ai->{addr};
 }
 
 
@@ -519,7 +520,11 @@ sub bt_peer_started {
 	return bt_error("Duplicated peer_id or changed IP address/name. ".
 			"Please restart BitTorrent.");
     }
-    my $iaddr= $peer->{'addr'};
+    warn "Peer:". Dumper($peer);
+    warn "Connection:". Dumper($connection);
+    my $iaddr =$connection->connected();
+
+    warn "Connected:". Dumper($iaddr);
 
     !(scalar keys %$peer) || $$peer{'ip'} eq $iaddr
       ## tolerate duplicate 'started' peer_id if the IPs match, else error.
@@ -527,7 +532,9 @@ sub bt_peer_started {
       || return bt_error("Duplicated peer_id or changed IP address/name. ".
 			 "Please restart BitTorrent.");
 
-    my $status = !CHECK_PEER || is_peer($iaddr, $cgi{'port'})
+
+    
+    my $status = $iaddr
       ? $cgi{'left'} != 0
 	  ? 'peer'
 	  : 'seed'

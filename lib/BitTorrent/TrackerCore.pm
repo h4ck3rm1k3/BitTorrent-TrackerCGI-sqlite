@@ -13,6 +13,27 @@ use File::Find;
 use Digest::SHA1;
 use Carp qw(cluck confess);
 
+use Socket qw( SOCK_RAW);
+use Carp qw(confess);
+use Socket::GetAddrInfo qw( getaddrinfo getnameinfo );
+use IO::Socket;
+use Data::Dumper;
+
+#use Bencode qw( bencode  ); #bdecode
+#use Convert::Bencode qw( bencode bdecode); #
+#use Convert::Bencode_XS qw(bencode bdecode);
+use Convert::Bencode_XS qw(bencode ); # the bdecode from this package does not work!
+use Bencode qw( bdecode);
+
+use APR::Table ();
+use Errno ();
+use Fcntl ();
+use Socket;
+use Symbol ();
+use Data::Dumper;
+use constant PROTOCOL_NAME     => 'BitTorrent protocol';
+use constant PROTOCOL_NAME_LEN => length(PROTOCOL_NAME);
+
 require Exporter;
 our @ISA = qw(Exporter);
 our @EXPORT_OK = qw(
@@ -37,25 +58,10 @@ CheckPeer
 );
 
 
-#use Bencode qw( bencode  ); #bdecode
-#use Convert::Bencode qw( bencode bdecode); #
-#use Convert::Bencode_XS qw(bencode bdecode);
-use Convert::Bencode_XS qw(bencode ); # the bdecode from this package does not work!
-use Bencode qw( bdecode);
-
-use APR::Table ();
-use Errno ();
-use Fcntl ();
-use Socket;
-use Symbol ();
-use Data::Dumper;
-use constant PROTOCOL_NAME     => 'BitTorrent protocol';
-use constant PROTOCOL_NAME_LEN => length(PROTOCOL_NAME);
-
 our $dbh;
 our @params;
 our %cgi =();
-our $debug=1;
+our $debug=0;
 
 ## BitTorrent::TrackerCGI
 ##
@@ -232,7 +238,6 @@ sub summary_sha1 {
 
 sub setcgi
 {
-#    warn Dumper(@_);
     %cgi = @_;
 }
 
@@ -247,14 +252,14 @@ use constant BT_EVENTS =>
   };
 
 
-
 sub convert_ip_ntoa 
 {
     my $ip=shift;
-    warn "convert_ip_ntoa :" . 	Dumper($ip) .	
-	":" . unpack("H*",$ip) ;
-    my $peer_addr = inet_ntoa($ip);
-    warn "convert_ip_ntoa :" . unpack("H*",$ip)   . " -> ". $peer_addr;
+    warn "convert_ip_ntoa :" . 	Dumper($ip) .		":" . unpack("H*",$ip)  if $debug;
+    #my $peer_addr = inet_ntoa($ip);
+    my ($err, $peer_addr, $servicename) = getnameinfo($ip);
+    die "Cannot getnameinfo - $err" if $err;
+    warn "convert_ip_ntoa :" . 	Dumper($err, $peer_addr, $servicename);
     return $peer_addr;
 }
 
@@ -339,11 +344,11 @@ sub bt_send_peer_list {
 	
 	foreach my $obj (@{$sth->fetchall_arrayref()})
 	{
-#	    warn "OBJ:".  Dumper($obj);
+	    warn "OBJ:".  Dumper($obj) if $debug >10;
 	    push @{$peers}, convert_ip_ntoa($obj->[0]);
 	}
 
-	warn "Peers:". Dumper($peers);
+	warn "Peers:". Dumper($peers) if $debug >10;
 
 	$sth->err  && return bt_error('database error');
 
@@ -357,12 +362,6 @@ sub bt_send_peer_list {
 				  'num peers' => $num_peers,
 				  'peers' => $peers })};
 }
-
-use Socket qw( SOCK_RAW);
-use Carp qw(confess);
-use Socket::GetAddrInfo qw( getaddrinfo getnameinfo );
-use IO::Socket;
-use Data::Dumper;
 
 sub CheckPeer 
 {
@@ -381,7 +380,7 @@ sub CheckPeer
     
     foreach my $ai ( @res ) {
 	my $candidate = IO::Socket->new();
-#    warn Dumper($ai);
+	warn Dumper($ai)  if $debug >20;
 	print "CHECK \n";
 	print "protocol" . $ai->{'protocol'} . "\n";
 	print "socktype" . $ai->{'socktype'} . "\n";
@@ -394,7 +393,7 @@ sub CheckPeer
 	}
 	
 	my $connection = $candidate->connect( $ai->{addr});
-	warn "connection". Dumper($connection);
+	warn "connection". Dumper($connection)  if $debug >10;
 	
 	if (! $connection)
 	{
@@ -404,7 +403,7 @@ sub CheckPeer
 	
 
 	my $socketopt = $connection->getsockopt(Socket::SOL_SOCKET,Socket::SO_ERROR);
-	warn Dumper($socketopt);
+	warn Dumper($socketopt) if $debug;
 	
 	## send
 	## entire sent string is short and should easily fit in socket send buffers
@@ -417,11 +416,11 @@ sub CheckPeer
 	my $data= chr(PROTOCOL_NAME_LEN).PROTOCOL_NAME.
 	    "\0\0\0\0\0\0\0\0".$info_hash;
 
-	warn "Going to send:".   Dumper($data);
+	warn "Going to send:".   Dumper($data)  if $debug >10;
 	my $sendret= $connection->send( $data,
 					Socket::MSG_DONTWAIT|Socket::MSG_NOSIGNAL);
 	
-	warn "Send:" . Dumper($sendret);
+	warn "Send:" . Dumper($sendret)  if $debug >10;
 
 	if ($sendret==1+(PROTOCOL_NAME_LEN)+8+20)
 	{
@@ -448,7 +447,7 @@ sub CheckPeer
 	my $recvdata= $connection->recv($data, 1+PROTOCOL_NAME_LEN+8+20+20, Socket::MSG_NOSIGNAL);
 	if (	defined($recvdata))
 	{
-	    warn "recv:" .  Dumper($recvdata);
+	    warn "recv:" .  Dumper($recvdata)  if $debug >10;
 	}
 	else
 	{
@@ -477,7 +476,8 @@ sub CheckPeer
 		    if (substr($data,1+PROTOCOL_NAME_LEN+8+20,20) eq $peer_id)
 		    {
 			warn "Found one!";
-			$sock = $candidate;
+#			$sock = $candidate;
+			$sock = $ai->{addr};
 			last;
 			
 		    }
@@ -502,11 +502,11 @@ sub CheckPeer
 	}      
     }
     if ($sock){
-	warn "Found $sock";
+	warn "Found " . unpack("H*",$sock);
     }
     
-#    return $sock;
-    return $ai->{addr};
+    return $sock;
+    #return $ai->{addr};
 }
 
 
@@ -514,17 +514,14 @@ sub bt_peer_started {
     my $peer = shift || confess "need peer";
     ## (DNS lookup (if DNS name, not IP) can take non-trivial amount of time)
 
-    my $connection =CheckPeer(@cgi{'ip','port','info_hash','peer_id'});
+    my $iaddr =CheckPeer(@cgi{'ip','port','info_hash','peer_id'});
 
-    if (!$connection)    { 
+    if (!$iaddr)    { 
 	return bt_error("Duplicated peer_id or changed IP address/name. ".
 			"Please restart BitTorrent.");
     }
-    warn "Peer:". Dumper($peer);
-    warn "Connection:". Dumper($connection);
-    my $iaddr =$connection->connected();
-
-    warn "Connected:". Dumper($iaddr);
+    warn "Peer:". Dumper($peer)  if $debug >10;
+    warn "Connected:". unpack("H*",$iaddr);
 
     !(scalar keys %$peer) || $$peer{'ip'} eq $iaddr
       ## tolerate duplicate 'started' peer_id if the IPs match, else error.
@@ -565,7 +562,7 @@ sub bt_peer_progress {
       || return bt_peer_started($peer); ## create peer if it does not exist
     my $sth;
 
-#    warn "CGI :". Dumper(%cgi);
+    warn "CGI :". Dumper(%cgi)  if $debug >30;
 
     ## check for completed peer or scc
     if ($cgi{'left'} == 0 && $$peer{'status'} ne 'seed') {
@@ -593,7 +590,7 @@ sub bt_peer_stopped {
     ## get peer info
     my $peer =  shift || confess "missing peer";;
 
-    warn "Got a stopped peer, what peers do we have?" . Dumper($peer);
+    warn "Got a stopped peer, what peers do we have?" . Dumper($peer)  if $debug >10;
 
     scalar keys(%$peer)
       || ($cgi{'left'} == 0 ? return 1 : return bt_error('unknown peer_id'));
@@ -1195,7 +1192,7 @@ sub scan_torrent_dir {
 			      unpack('H*',$_)	
 			  } keys %torrents);
 
-    #warn "Review ". Dumper(\%torrents);
+    warn "Review ". Dumper(\%torrents)  if $debug >30;
 
 }
 
@@ -1244,7 +1241,7 @@ sub process_torrent_files {
 	return; ## (torrents that become unreadable will be deleted from db!)
     }
 
-#    warn "metainfo:" .  Dumper(keys %{$metainfo});
+    warn "metainfo:" .  Dumper(keys %{$metainfo})  if $debug >40;
 
     if (! $$metainfo{'announce'} eq TRACKER_URL )
     {
@@ -1275,7 +1272,7 @@ sub process_torrent_files {
 	  length($relative_path) <= 92 ? $relative_path : '';
 
 	confess "missing sth_summary_ins" unless $sth_summary_ins;
-#	warn Dumper($sth_summary_ins);
+
 
 	my $torrent = summary_sha1($sha1);
 	if (!$torrent)
